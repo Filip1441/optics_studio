@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Project specific
+error.log
+*.json
+!scena_dyfrakcyjna.json
+!persistence/*.json
+
+# IDEs
+.vscode/
+.idea/
+.gemini/
