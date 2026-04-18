@@ -13,7 +13,7 @@ class WaveEngine:
         self.res = res
         self.size = size 
         self.dx = size / res
-        self.wavelength = 532e-9
+        self.wavelength = 532e-6
         self.padding_factor = 2 
         self.setup_grids(res, size)
 
@@ -81,7 +81,7 @@ class WaveEngine:
         return field * mask * phase
 
     def apply_grating(self, field, lines_mm, pattern="Linear Cosine"):
-        d = 1e-3 / lines_mm
+        d = 1.0 / lines_mm
         if "Zebra" in pattern:
             # Binary mask (Square wave)
             mask_x = (np.cos(2 * np.pi * self.X / d) > 0).astype(float)
@@ -116,9 +116,9 @@ class WaveEngine:
         src = next((c for c in components if "Source" in c.__class__.__name__), None)
         if not src: return None
         
-        self.wavelength = src.params.get('wavelength', 532.0) * 1e-9
+        self.wavelength = src.params.get('wavelength', 532.0) * 1e-6
         src_type = "planar" if "Beam" in src.__class__.__name__ else "point"
-        src_r = src.params.get('width', 0.1) / 2.0
+        src_r = src.params.get('width', 10.0) / 2.0
         
         # For Point Source, we simulate a small divergence initially
         # A smaller z_div means a steeper spherical wave
@@ -148,7 +148,7 @@ class WaveEngine:
         for visit in visit_list:
             z_step = max(0, visit['z'] - curr_z)
             if z_step > 0:
-                logger.info(f"Propagating {z_step:.3f}m to {visit['comp'].name}")
+                logger.info(f"Propagating {z_step:.3f}mm to {visit['comp'].name}")
                 field = self.propagate(field, z_step)
             curr_z = visit['z']
             

@@ -46,7 +46,7 @@ class OpticalSystem:
 	def __init__(self):
 		self.components = []
 		self.rays = [] # Rays for GUI display
-		self.table_bounds = 10.0 # 10x10 meter table
+		self.table_bounds = 1000.0 # 1000x1000 mm table
 
 	def update(self):
 		self.update_rays()
@@ -113,7 +113,7 @@ class OpticalSystem:
 				
 				# Simplified logic: The output beam center should coincide with the input beam center
 				y_center = np.mean([h['y'] for h in hits_data])
-				width = max(0.01, hits_data[-1]['y'] - hits_data[0]['y'])
+				width = max(1.0, hits_data[-1]['y'] - hits_data[0]['y'])
 				
 				n_orders = comp.params.get("n_orders", 2)
 				rpo = comp.params.get("rays_per_order", 9)
@@ -123,7 +123,7 @@ class OpticalSystem:
 				orders_z = orders_y if pattern in ["Crossed", "Chessboard"] else range(1)
 				
 				lines_mm = comp.params.get("line_density", 300)
-				d = (1e-3) / lines_mm 
+				d = 1.0 / lines_mm 
 				
 				# For 'Simplified' look, we use the average incident ray as a template for ALL rays
 				# This makes all rays in the diffracted fans appear to branch from the center of the hit
@@ -147,7 +147,7 @@ class OpticalSystem:
 							else:
 								interp_sy, interp_sz, interp_z = template_hit['sy'], template_hit['sz'], template_hit['z']
 							
-							wl_m = template_hit['wl'] * 1e-9
+							wl_m = template_hit['wl'] * 1e-6
 							sy, sz = interp_sy + my*(wl_m/d), interp_sz + mz*(wl_m/d)
 							
 							if (sy**2 + sz**2) <= 1.0:
@@ -157,7 +157,7 @@ class OpticalSystem:
 								new_dir = sy*v_y + sz*v_z + sc*n
 								new_dir /= np.linalg.norm(new_dir)
 								
-								origin = p_center + offset * v_y + interp_z * v_z + 1e-4 * n
+								origin = p_center + offset * v_y + interp_z * v_z + 1e-2 * n
 								child = Ray(origin, new_dir, template_hit['wl'])
 								# IMPROVED: Map each ray in the diffracted fan to the hit closest to its offset.
 								# This ensures the output beams maintain the correct width and alignment with input rays.
@@ -199,11 +199,11 @@ class OpticalSystem:
 					hit_pt, t = res
 					# Check if hit is within component boundary (radius)
 					dist_from_center = np.linalg.norm(hit_pt - np.array([comp.x, comp.y, 0.0]))
-					# For Mirror/Lens, let's assume 10cm radius for now or use params
+					# For Mirror/Lens, let's assume 25mm radius for now or use params
 					# For Aperture, we need a large detection radius to catch rays hitting the walls
-					r_comp = comp.params.get("r", 0.05) if hasattr(comp, 'params') else 0.05
+					r_comp = comp.params.get("r", 12.5) if hasattr(comp, 'params') else 12.5
 					if isinstance(comp, Aperture):
-						r_comp = 1.0 # 1m detection wall
+						r_comp = 1000.0 # 1m detection wall
 					
 					if t < closest_t and dist_from_center < r_comp:
 						closest_t = t
@@ -253,8 +253,8 @@ class OpticalSystem:
 						break
 					
 					lines_mm = hitted_comp.params.get("line_density", 300)
-					d = (1e-3) / lines_mm 
-					wl_m = ray.wavelength * 1e-9
+					d = 1.0 / lines_mm 
+					wl_m = ray.wavelength * 1e-6
 					angle_rad = np.radians(hitted_comp.angle)
 					n = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
 					v_y = np.array([-n[1], n[0], 0.0]) 
@@ -304,7 +304,7 @@ class OpticalSystem:
 					ray.origin = closest_hit
 					continue
 			else:
-				end_pt = ray.origin + ray.direction * 10.0
+				end_pt = ray.origin + ray.direction * 1000.0
 				ray.points.append(end_pt[:2])
 				ray.alive = False
 				# logger.debug("Ray left the scene.")
@@ -320,7 +320,7 @@ class OpticalSystem:
 			axis_ray = Ray([src.x, src.y, 0.0], [nx, ny, 0.0])
 			axis_ray._is_axis = True
 		else:
-			axis_ray = Ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+			axis_ray = Ray([-500.0, 0.0, 0.0], [1.0, 0.0, 0.0])
 			axis_ray._is_axis = True
 			
 		# Clear previous axis cache (optional but good for debugging)

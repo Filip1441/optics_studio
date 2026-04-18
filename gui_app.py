@@ -33,14 +33,21 @@ class AnalysisWorker(QRunnable):
         self.system = system
         self.comp = comp
         self.signals = AnalysisSignals()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     def run(self):
         try:
-            # Ta funkcja wykonuje siew osobnym watku
-            result = calculate_analysis(self.system, self.comp)
-            self.signals.finished.emit(result)
+            # Ta funkcja wykonuje się w osobnym wątku
+            res = calculate_analysis(self.system, self.comp, cancel_check=lambda: self._is_cancelled)
+            if res and not self._is_cancelled:
+                image_arr, report_text = res
+                self.signals.finished.emit((image_arr, report_text))
         except Exception as e:
-            print(f"Background Analysis Error: {e}")
+            if not self._is_cancelled:
+                print(f"Background Analysis Error: {e}")
 
 DARK_THEME = """
 QMainWindow, QWidget {
@@ -155,7 +162,7 @@ class VisualComponent(QGraphicsItem):
 
     def refresh_pos(self):
         self._syncing_handle = True
-        self.setPos(self.component.x * 100, self.component.y * 100)
+        self.setPos(self.component.x * 5.0, self.component.y * 5.0)
         self.setRotation(self.component.angle)
         
         # Position handle correctly on the circle
@@ -183,7 +190,8 @@ class VisualComponent(QGraphicsItem):
         super().hoverLeaveEvent(event)
 
     def boundingRect(self):
-        return QRectF(-25, -50, 50, 100)
+        r_px = self.component.params.get("r", 12.5) * 5.0
+        return QRectF(-r_px - 20, -r_px - 40, 2*r_px + 40, 2*r_px + 80)
 
     def paint(self, painter, option, widget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -203,10 +211,10 @@ class VisualComponent(QGraphicsItem):
         painter.drawText(-20, 35, self.component.name.split('(')[0].strip())
 
     def draw_shape(self, painter):
-        r = self.component.params.get("r", 0.2) * 100 # Half-width in pixels
+        r = self.component.params.get("r", 12.5) * 5.0 # Half-width in pixels
         
         if isinstance(self.component, Lens):
-            f = self.component.params.get("f", 0.1)
+            f = self.component.params.get("f", 50.0)
             ri = int(round(r))
             painter.drawLine(0, -ri, 0, ri)
             if f > 0:
@@ -240,7 +248,7 @@ class VisualComponent(QGraphicsItem):
             painter.drawLine(0, 0, 10, 0)
         elif isinstance(self.component, BeamSource):
             painter.setBrush(QBrush(QColor(255, 50, 50, 150)))
-            w_px = self.component.params.get('width', 0.1) * 100
+            w_px = self.component.params.get('width', 10.0) * 5.0
             painter.drawRect(-3, -w_px/2, 6, w_px)
             # Directional arrow
             painter.setPen(QPen(Qt.GlobalColor.white, 1))
@@ -251,8 +259,8 @@ class VisualComponent(QGraphicsItem):
             # Aperture: Two blocks with a gap of 2*r
             painter.setPen(QPen(QColor(150, 150, 150), 4))
             gap_i = int(round(r))
-            painter.drawLine(0, -100, 0, -gap_i) # Outer part
-            painter.drawLine(0, gap_i, 0, 100)
+            painter.drawLine(0, -500, 0, -gap_i) # Outer part
+            painter.drawLine(0, gap_i, 0, 500)
             # Opening markers
             painter.setPen(QPen(QColor(255, 255, 255), 1))
             painter.drawLine(-3, -gap_i, 3, -gap_i)
@@ -288,7 +296,7 @@ class VisualComponent(QGraphicsItem):
             painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
             painter.drawLine(0, -ri, 0, ri)
             # Opaque blocking center (the High-Pass part)
-            block_r = self.component.params.get("r", 0.01) * 100
+            block_r = self.component.params.get("r", 1.0) * 5.0
             painter.setBrush(QBrush(QColor(255, 100, 100)))
             painter.setPen(QPen(QColor(255, 100, 100), 1))
             painter.drawEllipse(-3, -int(block_r), 6, int(2*block_r))
@@ -315,7 +323,7 @@ class VisualComponent(QGraphicsItem):
             
             # Dynamic Optical Axis Snapping
             if self.app.snapping_enabled:
-                grid = 5.0 # 0.05m = 5px
+                grid = 5.0 # 1.0mm = 5px
                 new_pos.setX(round(new_pos.x() / grid) * grid)
                 new_pos.setY(round(new_pos.y() / grid) * grid)
                 
@@ -325,8 +333,8 @@ class VisualComponent(QGraphicsItem):
                 
                 # Check each segment of the optical axis path
                 for i in range(len(axis_pts)-1):
-                    p1 = np.array(axis_pts[i]) * 100
-                    p2 = np.array(axis_pts[i+1]) * 100
+                    p1 = np.array(axis_pts[i]) * 5.0
+                    p2 = np.array(axis_pts[i+1]) * 5.0
                     pt = np.array([new_pos.x(), new_pos.y()])
                     
                     # Distance from point to line segment
@@ -360,8 +368,8 @@ class VisualComponent(QGraphicsItem):
                         angle_deg = np.degrees(angle_rad)
                         self.update_angle(angle_deg)
 
-            self.component.x = new_pos.x() / 100.0
-            self.component.y = new_pos.y() / 100.0
+            self.component.x = new_pos.x() / 5.0
+            self.component.y = new_pos.y() / 5.0
             logger.info(f"UI: Component {self.component.uid} snapped to Dynamic Axis. Angle: {self.component.angle}°")
             self.app.update_rays()
             self.app.props_panel.sync_data()
@@ -388,9 +396,9 @@ class PropertyPanel(QWidget):
         self.angle_spin = QDoubleSpinBox()
         
         for s in [self.x_spin, self.y_spin]:
-            s.setRange(-5, 5)
-            s.setSingleStep(0.01)
-            s.setSuffix(" m")
+            s.setRange(-2000, 2000)
+            s.setSingleStep(1.0)
+            s.setSuffix(" mm")
         
         self.angle_spin.setRange(-360, 360)
         self.angle_spin.setSuffix(" °")
@@ -439,8 +447,9 @@ class PropertyPanel(QWidget):
         # 1. Lens specifics
         if isinstance(comp, Lens):
             f_spin = QDoubleSpinBox()
-            f_spin.setRange(-2, 2)
-            f_spin.setValue(comp.params.get('f', 0.5))
+            f_spin.setRange(-2000, 2000)
+            f_spin.setValue(comp.params.get('f', 50.0))
+            f_spin.setSuffix(" mm")
             f_spin.valueChanged.connect(lambda v: self.apply_param('f', v))
             self.specific_form.addRow("Focal Length", f_spin)
         
@@ -454,8 +463,9 @@ class PropertyPanel(QWidget):
             self.specific_form.addRow("Num Rays", nr_spin)
             if isinstance(comp, BeamSource):
                 w_spin = QDoubleSpinBox()
-                w_spin.setRange(0.01, 1.0)
-                w_spin.setValue(comp.params.get('width', 0.1))
+                w_spin.setRange(0.1, 500.0)
+                w_spin.setSuffix(" mm")
+                w_spin.setValue(comp.params.get('width', 10.0))
                 w_spin.valueChanged.connect(lambda v: self.apply_param('width', v))
                 self.specific_form.addRow("Beam Width", w_spin)
             else:
@@ -477,11 +487,11 @@ class PropertyPanel(QWidget):
         # 3. Diameter / Radius control (Only for valid targets)
         if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter)):
             r_spin = QDoubleSpinBox()
-            r_spin.setRange(0.001, 2.0)
-            r_spin.setSuffix(" m")
+            r_spin.setRange(0.1, 500.0)
+            r_spin.setSuffix(" mm")
             label = "Opening (R)" if isinstance(comp, Aperture) else "Radius (R)"
             self.specific_form.addRow(label, r_spin)
-            r_spin.setValue(comp.params.get('r', 0.2))
+            r_spin.setValue(comp.params.get('r', 12.5))
             r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
 
         # 4. Grating Density & Preview Logic
@@ -514,9 +524,9 @@ class PropertyPanel(QWidget):
         # 5. Detector specifics (Spectral View)
         if isinstance(comp, Detector):
             s_spin = QDoubleSpinBox()
-            s_spin.setRange(0.001, 1.0)
-            s_spin.setSuffix(" m")
-            s_spin.setValue(comp.params.get('size', 0.05))
+            s_spin.setRange(0.1, 500.0)
+            s_spin.setSuffix(" mm")
+            s_spin.setValue(comp.params.get('size', 10.0))
             s_spin.valueChanged.connect(lambda v: self.apply_param('size', v))
             self.specific_form.addRow("Detector Size", s_spin)
 
@@ -545,14 +555,17 @@ class PropertyPanel(QWidget):
         self.sensor_label.setText("ANALYZING...")
         
         # Optimization: Use fixed sensor size for placeholder
-        # Actual size param is reported in terminal
-        
         # Start background analysis
-        worker = AnalysisWorker(self.app.system, comp)
-        worker.signals.finished.connect(self.on_analysis_done)
-        QThreadPool.globalInstance().start(worker)
+        if hasattr(self, '_current_worker') and self._current_worker:
+            self._current_worker.cancel()
+            
+        self._current_worker = AnalysisWorker(self.app.system, comp)
+        self._current_worker.signals.finished.connect(self.on_analysis_done)
+        QThreadPool.globalInstance().start(self._current_worker)
 
-    def on_analysis_done(self, noise_arr):
+    def on_analysis_done(self, result):
+        self._current_worker = None
+        noise_arr, report_text = result
         # Result received from background thread
         h, w = noise_arr.shape
         qimg = QImage(noise_arr.data, w, h, w, QImage.Format.Format_Grayscale8)
@@ -599,26 +612,26 @@ class ZoomableView(QGraphicsView):
         pen = QPen(QColor(40, 40, 40), 1)
         painter.setPen(pen)
         
-        # Minor Grid (10cm = 10px)
-        left = int(rect.left()) - (int(rect.left()) % 10)
-        top = int(rect.top()) - (int(rect.top()) % 10)
+        # Minor Grid (10mm = 50px)
+        left = int(rect.left()) - (int(rect.left()) % 50)
+        top = int(rect.top()) - (int(rect.top()) % 50)
         
-        for x in range(left, int(rect.right()), 10):
+        for x in range(left, int(rect.right()), 50):
             painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
-        for y in range(top, int(rect.bottom()), 10):
+        for y in range(top, int(rect.bottom()), 50):
             painter.drawLine(int(rect.left()), y, int(rect.right()), y)
             
-        # Major Grid (1m = 100px)
+        # Major Grid (100mm = 500px)
         pen.setColor(QColor(60, 60, 60))
         pen.setWidth(2)
         painter.setPen(pen)
         
-        left_m = int(rect.left()) - (int(rect.left()) % 100)
-        top_m = int(rect.top()) - (int(rect.top()) % 100)
+        left_m = int(rect.left()) - (int(rect.left()) % 500)
+        top_m = int(rect.top()) - (int(rect.top()) % 500)
         
-        for x in range(left_m, int(rect.right()), 100):
+        for x in range(left_m, int(rect.right()), 500):
             painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
-        for y in range(top_m, int(rect.bottom()), 100):
+        for y in range(top_m, int(rect.bottom()), 500):
             painter.drawLine(int(rect.left()), y, int(rect.right()), y)
 
         # Draw Dynamic Optical Axis
@@ -629,8 +642,8 @@ class ZoomableView(QGraphicsView):
             pen.setDashPattern([10, 5])
             painter.setPen(pen)
             for i in range(len(axis_pts)-1):
-                p1 = QPointF(axis_pts[i][0]*100, axis_pts[i][1]*100)
-                p2 = QPointF(axis_pts[i+1][0]*100, axis_pts[i+1][1]*100)
+                p1 = QPointF(axis_pts[i][0]*5.0, axis_pts[i][1]*5.0)
+                p2 = QPointF(axis_pts[i+1][0]*5.0, axis_pts[i+1][1]*5.0)
                 painter.drawLine(p1, p2)
 
     def wheelEvent(self, event):
@@ -680,13 +693,13 @@ class SimulatorApp(QMainWindow):
             return a
 
         add_action("Lens", "L", lambda: self.add_comp(Lens(0, 0, 0)))
-        add_action("Mirror", "M", lambda: self.add_comp(Mirror(0.5, 0, 45)))
-        add_action("Grating", "G", lambda: self.add_comp(Grating(0.5, 0, 0)))
-        add_action("High-Pass", "HP", lambda: self.add_comp(HighPassFilter(0.5, 0, 0)))
-        add_action("Fan Src", "S", lambda: self.add_comp(PointSource(-0.8, 0, 0)))
-        add_action("Beam Src", "B", lambda: self.add_comp(BeamSource(-0.8, -0.2, 0)))
-        add_action("Aperture", "A", lambda: self.add_comp(Aperture(0.5, 0, 0)))
-        add_action("Detector", "D", lambda: self.add_comp(Detector(1.2, 0, 0)))
+        add_action("Mirror", "M", lambda: self.add_comp(Mirror(50, 0, 45)))
+        add_action("Grating", "G", lambda: self.add_comp(Grating(50, 0, 0)))
+        add_action("High-Pass", "HP", lambda: self.add_comp(HighPassFilter(50, 0, 0)))
+        add_action("Fan Src", "S", lambda: self.add_comp(PointSource(-80, 0, 0)))
+        add_action("Beam Src", "B", lambda: self.add_comp(BeamSource(-80, -20, 0)))
+        add_action("Aperture", "A", lambda: self.add_comp(Aperture(50, 0, 0)))
+        add_action("Detector", "D", lambda: self.add_comp(Detector(120, 0, 0)))
         
         toolbar.addSeparator()
         self.snap_act = QAction("Snapping ON", self)
@@ -714,15 +727,15 @@ class SimulatorApp(QMainWindow):
         # Point source at [-0.8, 0]
         # Lens at [-0.3, 0] with f=0.5
         # Detector at [0.5, 0]
-        src = PointSource(-0.8, 0.0, 0)
+        src = PointSource(-100.0, 0.0, 0)
         src.params["angle_range"] = 0.4
         
-        l1 = Lens(-0.3, 0.0, 0)
-        l1.params["f"] = 0.5
-        l1.params["r"] = 0.25
+        l1 = Lens(-30, 0.0, 0)
+        l1.params["f"] = 50.0
+        l1.params["r"] = 25.0
         
-        det = Detector(0.8, 0.0, 0)
-        det.params["r"] = 0.3
+        det = Detector(80.0, 0.0, 0)
+        det.params["r"] = 30.0
         
         for c in [src, l1, det]:
             self.add_comp(c)
@@ -758,9 +771,9 @@ class SimulatorApp(QMainWindow):
             path = QPainterPath()
             if len(ray.points) > 1:
                 pts = ray.points
-                path.moveTo(pts[0][0]*100, pts[0][1]*100)
+                path.moveTo(pts[0][0]*5.0, pts[0][1]*5.0)
                 for p in pts[1:]:
-                    path.lineTo(p[0]*100, p[1]*100)
+                    path.lineTo(p[0]*5.0, p[1]*5.0)
                 
                 color = wavelength_to_color(ray.wavelength)
                 
