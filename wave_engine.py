@@ -80,14 +80,19 @@ class WaveEngine:
         phase = np.exp(-1j * k / (2 * f) * r_sq)
         return field * mask * phase
 
-    def apply_grating(self, field, lines_mm, pattern="Linear"):
+    def apply_grating(self, field, lines_mm, pattern="Linear Cosine"):
         d = 1e-3 / lines_mm
-        if pattern == "Chessboard":
-            # Approximated chessboard mask
-            trans = 0.5 * (1 + np.cos(2 * np.pi * self.X / d) * np.cos(2 * np.pi * self.Y / d))
+        if "Zebra" in pattern:
+            # Binary mask (Square wave)
+            mask_x = (np.cos(2 * np.pi * self.X / d) > 0).astype(float)
+            trans = mask_x
+            if "Crossed" in pattern:
+                mask_y = (np.cos(2 * np.pi * self.Y / d) > 0).astype(float)
+                trans *= mask_y
         else:
+            # Cosine mask (Sinusoidal)
             trans = 0.5 * (1 + np.cos(2 * np.pi * self.X / d))
-            if pattern == "Crossed": 
+            if "Crossed" in pattern: 
                 trans *= 0.5 * (1 + np.cos(2 * np.pi * self.Y / d))
         return field * trans
 

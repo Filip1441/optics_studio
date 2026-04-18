@@ -21,6 +21,7 @@ class Ray:
 		self.wavelength = wavelength # nm
 		self.points = [self.origin[:2]] # XY projections for 2D UI
 		self.z_hits = [self.origin[2]] # Z coordinates track
+		self.hitted_components = [] # For analysis
 		self.alive = True
 
 	def propagate_to_plane(self, p_on_plane, n_plane):
@@ -55,11 +56,6 @@ class OpticalSystem:
 		self.rays = []
 		all_trace_queue = deque() # Queue for BFS
 		
-		# Clear Detector hits
-		for comp in self.components:
-			if hasattr(comp, 'hits'):
-				comp.hits = []
-		
 		# --- LAYER 1: GUI RAYS (DETERMINISTIC) ---
 		for src in [c for c in self.components if isinstance(c, (PointSource, BeamSource))]:
 			n_gui = src.params.get("n_rays", 21)
@@ -80,8 +76,6 @@ class OpticalSystem:
 					origin = np.array([src.x, src.y, 0.0]) + np.array([tx*offset, ty*offset, 0.0])
 					ray = Ray(origin, [nx, ny, 0.0], wavelength=wl)
 					self.rays.append(ray)
-					
-			
 
 		# Process all rays
 		for r in self.rays:
@@ -219,6 +213,7 @@ class OpticalSystem:
 			if hitted_comp:
 				# Add XY projection for 2D UI
 				ray.points.append(closest_hit[:2])
+				ray.hitted_components.append(hitted_comp)
 				ray.origin = closest_hit # Update 3D ray start for next segment
 				
 				if isinstance(hitted_comp, Mirror):
@@ -246,13 +241,52 @@ class OpticalSystem:
 					ray.direction -= (v_axial * h_u / f) * v_tangent + (v_axial * h_z / f) * w_z
 					ray.direction /= np.linalg.norm(ray.direction)
 				elif isinstance(hitted_comp, Grating):
+					is_anal = getattr(ray, '_is_analysis', False)
+					is_axis = getattr(ray, '_is_axis', False)
 					is_generated = getattr(ray, '_is_generated', False)
-					if not is_generated:
+					
+					# Axis rays continue as Order 0 to explore the full scene
+					if not is_anal and not is_axis and not is_generated:
 						if not hasattr(hitted_comp, '_gui_hits'): hitted_comp._gui_hits = []
 						hitted_comp._gui_hits.append({'pt': closest_hit, 'ray': ray})
+						ray.alive = False
+						break
 					
-					ray.alive = False
-					break
+					lines_mm = hitted_comp.params.get("line_density", 300)
+					d = (1e-3) / lines_mm 
+					wl_m = ray.wavelength * 1e-9
+					angle_rad = np.radians(hitted_comp.angle)
+					n = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
+					v_y = np.array([-n[1], n[0], 0.0]) 
+					v_z = np.array([0.0, 0.0, 1.0])
+					
+					n_orders = hitted_comp.params.get("n_orders", 2)
+					pattern = hitted_comp.params.get("pattern", "Linear Cosine")
+					orders_y = range(-n_orders, n_orders + 1)
+					orders_z = orders_y if "Crossed" in pattern else range(1)
+
+					if is_anal:
+						sin_iy, sin_iz = np.dot(ray.direction, v_y), np.dot(ray.direction, v_z)
+						for my in orders_y:
+							for mz in orders_z:
+								if pattern == "Chessboard" and (my + mz) % 2 != 0: continue
+								sy, sz = sin_iy + my*(wl_m/d), sin_iz + mz*(wl_m/d)
+								if (sy**2 + sz**2) <= 1.0:
+									sc = np.sqrt(1.0 - sy**2 - sz**2)
+									if np.dot(ray.direction, n) < 0: sc = -sc
+									new_dir = sy*v_y + sz*v_z + sc*n
+									child = Ray(closest_hit, new_dir/np.linalg.norm(new_dir), ray.wavelength)
+									child._is_analysis = True
+									child.points = list(ray.points)
+									if queue is not None: queue.append(child)
+					elif is_axis:
+						# Axis ray continues as order 0
+						sin_iy, sin_iz = np.dot(ray.direction, v_y), np.dot(ray.direction, v_z)
+						sc = np.sqrt(max(0, 1.0 - sin_iy**2 - sin_iz**2))
+						if np.dot(ray.direction, n) < 0: sc = -sc
+						ray.direction = sin_iy*v_y + sin_iz*v_z + sc*n
+						ray.origin = closest_hit
+						continue
 
 				elif isinstance(hitted_comp, Aperture):
 					r_stop = hitted_comp.params.get("r", 0.05)
@@ -267,8 +301,8 @@ class OpticalSystem:
 						ray.alive = False
 						break
 				elif isinstance(hitted_comp, Detector):
-					ray.alive = False
-					break
+					ray.origin = closest_hit
+					continue
 			else:
 				end_pt = ray.origin + ray.direction * 10.0
 				ray.points.append(end_pt[:2])
@@ -279,15 +313,16 @@ class OpticalSystem:
 	def get_axis_path(self):
 		"""Calculates the main optical axis path (starts from the first source)."""
 		src = next((c for c in self.components if isinstance(c, (PointSource, BeamSource))), None)
+		
+		# Axis starts from source position and follows its main emission direction
 		if src:
 			nx, ny = np.cos(np.radians(src.angle)), np.sin(np.radians(src.angle))
 			axis_ray = Ray([src.x, src.y, 0.0], [nx, ny, 0.0])
+			axis_ray._is_axis = True
 		else:
 			axis_ray = Ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+			axis_ray._is_axis = True
+			
+		# Clear previous axis cache (optional but good for debugging)
 		self.trace_ray(axis_ray)
 		return axis_ray.points
-
-	def analyze_system(self):
-		"""Returns a structured text report of components along the optical axis."""
-		from analysis_engine import run_axial_analysis
-		return run_axial_analysis(self)

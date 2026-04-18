@@ -36,7 +36,8 @@ class OpticalComponent:
 		
 		# Specialized logic for certain components
 		if isinstance(obj, Lens):
-			obj.name = "Lens"
+			f = obj.params.get("f", 0.5)
+			obj.name = f"Lens (f={f})"
 		return obj
 
 class PointSource(OpticalComponent):
@@ -47,7 +48,6 @@ class PointSource(OpticalComponent):
 
 class Lens(OpticalComponent):
 	def __init__(self, x=0, y=0, angle=0, f=0.5, r=0.2):
-		# Default to larger scale (f=50cm, r=20cm) as user wants 10m table
 		super().__init__(x, y, angle, "Lens")
 		self.params = {"f": f, "r": r}
 
@@ -68,13 +68,14 @@ class Grating(OpticalComponent):
 			"n_orders": 2, 
 			"rays_per_order": 9,
 			"beam_width_preview": 0.1,
-			"pattern": "Linear" # Linear, Crossed, Chessboard
+			"pattern": "Linear Cosine" # Linear Zebra/Cosine, Crossed Zebra/Cosine
 		}
 
 class Detector(OpticalComponent):
 	def __init__(self, x=0, y=0, angle=0, r=0.2):
 		super().__init__(x, y, angle, "Detector")
-		self.params = {"r": r}
+		# size: physical side length of the 2048x2048 sensor [m]
+		self.params = {"r": r, "size": 0.05} 
 		self.hits = []
 
 class Aperture(OpticalComponent):

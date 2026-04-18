@@ -7,39 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView,
                              QLabel, QFormLayout, QPushButton, QFileDialog,
                              QGraphicsPathItem, QMenu, QHBoxLayout, QFrame,
                              QScrollArea, QDockWidget, QCheckBox, QGroupBox, QSpinBox)
-from PyQt6.QtCore import Qt, QRectF, QRect, QPointF, pyqtSignal, QEvent, QTimer, QThread, QObject
+from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QEvent, QObject, QRunnable, QThreadPool
 from PyQt6.QtGui import QPen, QBrush, QColor, QAction, QPainterPath, QTransform, QPainter, QFont, QPixmap, QRadialGradient, QImage
-
-class AnalysisWorker(QObject):
-    finished = pyqtSignal(str, QImage, object) # report, preview_image, full_res_data
-    def __init__(self, system, color):
-        super().__init__()
-        self.system = system
-        self.color = color
-    def run(self):
-        report, image_data = self.system.analyze_system()
-        
-        # 1. Prepare Preview (256x256)
-        h_orig, w_orig = image_data.shape
-        display_res = 256
-        step = max(1, h_orig // display_res)
-        small_data = image_data[::step, ::step]
-        h, w = small_data.shape
-        img_uint8 = (small_data * 255).astype(np.uint8)
-        
-        # 2. Color Mapping in Background Thread
-        preview_image = QImage(w, h, QImage.Format.Format_RGB32)
-        for y in range(h):
-            for x in range(w):
-                v = int(img_uint8[y, x])
-                px_color = QColor(
-                    int(self.color.red() * v / 255),
-                    int(self.color.green() * v / 255),
-                    int(self.color.blue() * v / 255)
-                )
-                preview_image.setPixelColor(x, y, px_color)
-        
-        self.finished.emit(report, preview_image, image_data)
 
 import numpy as np
 
@@ -48,12 +17,30 @@ from optics_engine import Ray, OpticalSystem
 from components import *
 from persistence import SceneManager
 from wave_engine import WaveEngine
+from analysis_engine import calculate_analysis
 from scipy.fft import fft2, fftshift
 
 import logging
-from threading import Thread
 logger = logging.getLogger("SimulatorApp")
 logger.setLevel(logging.WARNING)
+
+class AnalysisSignals(QObject):
+    finished = pyqtSignal(object)
+
+class AnalysisWorker(QRunnable):
+    def __init__(self, system, comp):
+        super().__init__()
+        self.system = system
+        self.comp = comp
+        self.signals = AnalysisSignals()
+
+    def run(self):
+        try:
+            # Ta funkcja wykonuje siew osobnym watku
+            result = calculate_analysis(self.system, self.comp)
+            self.signals.finished.emit(result)
+        except Exception as e:
+            print(f"Background Analysis Error: {e}")
 
 DARK_THEME = """
 QMainWindow, QWidget {
@@ -294,13 +281,17 @@ class VisualComponent(QGraphicsItem):
                         for j in np.arange(-ri, ri, 10):
                             if (i // 10 + j // 10) % 2 == 0:
                                 painter.drawRect(i, j, 10, 10)
-        elif isinstance(self.component, HighPassFilter):
-            # High-Pass Filter: A central blocking disk (DC Block)
-            painter.setPen(QPen(QColor(255, 100, 100), 2))
-            painter.setBrush(QBrush(QColor(255, 50, 50, 150)))
-            # Draw as a solid circle in the center
-            ri = int(round(r)) 
-            painter.drawEllipse(-ri, -ri, 2*ri, 2*ri)
+        elif self.component.__class__.__name__ == "HighPassFilter":
+            # HighPassFilter: Central blocking dot on a thin line
+            ri = int(round(r))
+            # Support glass substrate line
+            painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+            painter.drawLine(0, -ri, 0, ri)
+            # Opaque blocking center (the High-Pass part)
+            block_r = self.component.params.get("r", 0.01) * 100
+            painter.setBrush(QBrush(QColor(255, 100, 100)))
+            painter.setPen(QPen(QColor(255, 100, 100), 1))
+            painter.drawEllipse(-3, -int(block_r), 6, int(2*block_r))
         elif isinstance(self.component, Detector):
             # Scientific Camera Shape: Body + Sensor housing
             painter.setPen(QPen(QColor(100, 116, 139), 2)) # Blue-gray metallic
@@ -388,19 +379,6 @@ class PropertyPanel(QWidget):
         self.label = QLabel("PROPERTIES")
         self.label.setStyleSheet("font-size: 14px; color: #3d5afe; font-weight: bold; margin-bottom: 20px;")
         self.layout.addWidget(self.label)
-        
-        # Form layouts
-        self.form_layout = QFormLayout()
-        self.layout.addLayout(self.form_layout)
-        
-        # Async Analysis Infrastructure
-        self.analysis_thread = None
-        self.analysis_worker = None
-        
-        # Debounce timer for heavy analysis/wave calculations
-        self.analysis_timer = QTimer()
-        self.analysis_timer.setSingleShot(True)
-        self.analysis_timer.timeout.connect(self.trigger_delayed_analysis)
         
         self.form = QFormLayout()
         self.layout.addLayout(self.form)
@@ -496,30 +474,21 @@ class PropertyPanel(QWidget):
             wl_spin.valueChanged.connect(lambda v: self.apply_param('wavelength', v))
             self.specific_form.addRow("Wavelength", wl_spin)
 
-        # 3. Diameter / Radius / Size control
+        # 3. Diameter / Radius control (Only for valid targets)
         if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter)):
             r_spin = QDoubleSpinBox()
-            r_spin.setRange(0.001, 5.0)
+            r_spin.setRange(0.001, 2.0)
             r_spin.setSuffix(" m")
-            
-            # Context-sensitive labeling and value conversion
-            if isinstance(comp, Detector):
-                label = "Sensor Width (Side)"
-                r_spin.setValue(comp.params.get('r', 0.05) * 2) # Show full side
-                r_spin.valueChanged.connect(lambda v: self.apply_param('r', v / 2))
-            else:
-                if isinstance(comp, Aperture): label = "Opening (R)"
-                else: label = "Component Radius (R)"
-                r_spin.setValue(comp.params.get('r', 0.1))
-                r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
-            
+            label = "Opening (R)" if isinstance(comp, Aperture) else "Radius (R)"
             self.specific_form.addRow(label, r_spin)
+            r_spin.setValue(comp.params.get('r', 0.2))
+            r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
 
         # 4. Grating Density & Preview Logic
         if isinstance(comp, Grating):
             p_combo = self.app.add_combo_to_form(self.specific_form, "Pattern", 
-                                                 ["Linear", "Crossed", "Chessboard"], 
-                                                 comp.params.get('pattern', 'Linear'),
+                                                 ["Linear Zebra", "Linear Cosine", "Crossed Zebra", "Crossed Cosine"], 
+                                                 comp.params.get('pattern', 'Linear Cosine'),
                                                  lambda v: self.apply_param('pattern', v))
 
             d_spin = QDoubleSpinBox()
@@ -544,6 +513,13 @@ class PropertyPanel(QWidget):
         
         # 5. Detector specifics (Spectral View)
         if isinstance(comp, Detector):
+            s_spin = QDoubleSpinBox()
+            s_spin.setRange(0.001, 1.0)
+            s_spin.setSuffix(" m")
+            s_spin.setValue(comp.params.get('size', 0.05))
+            s_spin.valueChanged.connect(lambda v: self.apply_param('size', v))
+            self.specific_form.addRow("Detector Size", s_spin)
+
             spec_check = QCheckBox("Spectral Analysis (Fourier)")
             spec_check.setStyleSheet("color: #3d5afe; font-weight: bold;")
             spec_check.setChecked(comp.params.get('spectral_view', False))
@@ -555,76 +531,38 @@ class PropertyPanel(QWidget):
         del_btn.clicked.connect(self.app.delete_selected)
         self.specific_form.addRow(del_btn)
         
-        # Update Sensor View if detector (Now live analysis via thread)
+        # Update Sensor View if detector
         if isinstance(comp, Detector):
-            self.add_btn_to_form(self.specific_form, "Save High-Res Image", lambda: self.save_detector_image(comp))
-            # Trigger analysis via timer to keep UI snappy
-            self.analysis_timer.start(10)
+            self.update_detector_view(comp)
         else:
             self.sensor_label.hide()
             
         self._syncing = False
 
-    def update_detector_view(self, comp, preview_image=None, full_res_data=None):
+    def update_detector_view(self, comp):
         if not self.sensor_label: return
         self.sensor_label.show()
+        self.sensor_label.setText("ANALYZING...")
         
-        W, H = 240, 160
-        canvas = QPixmap(W, H)
-        canvas.fill(QColor(0, 0, 0))
-        painter = QPainter(canvas)
+        # Optimization: Use fixed sensor size for placeholder
+        # Actual size param is reported in terminal
         
-        if preview_image is not None:
-            comp._last_image = full_res_data
-            # Just draw the pre-rendered image! (Instant)
-            painter.drawImage(QRect(40, 0, 160, 160), preview_image)
-        else:
-            painter.setPen(QPen(QColor(50, 50, 50)))
-            painter.drawText(10, 80, "No Analysis Data")
-        
-        painter.end()
-        self.sensor_label.setPixmap(canvas)
+        # Start background analysis
+        worker = AnalysisWorker(self.app.system, comp)
+        worker.signals.finished.connect(self.on_analysis_done)
+        QThreadPool.globalInstance().start(worker)
 
-    def add_btn_to_form(self, form, label, callback):
-        btn = QPushButton(label)
-        btn.clicked.connect(callback)
-        form.addRow(btn)
-        return btn
-
-    def save_detector_image(self, comp):
-        if not hasattr(comp, '_last_image'):
-            logger.error("No image data to save.")
-            return
-            
-        # Calculate real scale: mm per pixel
-        r_m = comp.params.get('r', 0.2)
-        diam_mm = r_m * 2000.0
-        mm_per_pixel = diam_mm / 2048.0
+    def on_analysis_done(self, noise_arr):
+        # Result received from background thread
+        h, w = noise_arr.shape
+        qimg = QImage(noise_arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+        pixmap = QPixmap.fromImage(qimg)
         
-        # Open file dialog
-        default_name = f"detector_metrology_{mm_per_pixel:.6f}mm_per_pixel.png"
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Metrology Image", default_name, "PNG Files (*.png)")
-        
-        if filename:
-            h, w = comp._last_image.shape
-            img_uint8 = (comp._last_image * 255).astype(np.uint8)
-            
-            src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
-            wl_nm = src.params.get('wavelength', 532.0) if src else 532.0
-            qc = wavelength_to_color(wl_nm)
-            
-            # VECTORIZED SAVING - Extremely fast even for 2048x2048
-            buf = np.zeros((h, w, 4), dtype=np.uint8)
-            buf[..., 0] = (img_uint8 * qc.blue() / 255).astype(np.uint8)
-            buf[..., 1] = (img_uint8 * qc.green() / 255).astype(np.uint8)
-            buf[..., 2] = (img_uint8 * qc.red() / 255).astype(np.uint8)
-            buf[..., 3] = 255
-            
-            save_image = QImage(buf.data, w, h, QImage.Format.Format_RGB32)
-            if save_image.save(filename):
-                logger.info(f"Image saved to {filename}")
-            else:
-                logger.error("Failed to save image.")
+        # Scale to fit fixed sensor label size (240x160)
+        scaled_pixmap = pixmap.scaled(240, 160, Qt.AspectRatioMode.KeepAspectRatio)
+        self.sensor_label.setPixmap(scaled_pixmap)
+        self.sensor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sensor_label.setStyleSheet("border: 2px solid #3d5afe; border-radius: 4px; margin-top: 10px;")
 
     def apply_changes(self):
         items = self.app.scene.selectedItems()
@@ -642,63 +580,9 @@ class PropertyPanel(QWidget):
     def apply_param(self, key, val):
         items = self.app.scene.selectedItems()
         if not items: return
-        comp = items[0].component
-        comp.params[key] = val
-        logger.info(f"UI: Property '{key}' updated for {comp.uid} to {val}")
+        items[0].component.params[key] = val
+        logger.info(f"UI: Property '{key}' updated for {items[0].component.uid} to {val}")
         self.app.update_rays()
-        
-        # Trigger analysis (throttled/debounced)
-        if isinstance(comp, Detector):
-            # Reset timer - analysis will run 500ms after last change
-            self.analysis_timer.start(500)
-
-    def trigger_delayed_analysis(self):
-        """Heavy analysis task triggered after interaction settles."""
-        # 1. Physical safety check: is the previous calculation still busy?
-        if self.analysis_thread is not None:
-            try:
-                if self.analysis_thread.isRunning():
-                    # Still calculating the previous frame. 
-                    # We defer this update to keep the UI responsive.
-                    self.analysis_timer.start(300) 
-                    return 
-            except RuntimeError:
-                self.analysis_thread = None
-
-        items = self.app.scene.selectedItems()
-        if not items: return
-        comp = items[0].component
-        if not isinstance(comp, Detector): return
-            
-        # Get current color for the background thread
-        src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
-        wl_nm = src.params.get('wavelength', 532.0) if src else 532.0
-        qc = wavelength_to_color(wl_nm)
-
-        # 2. Build new worker/thread for the new state
-        self.analysis_thread = QThread()
-        self.analysis_worker = AnalysisWorker(self.app.system, qc)
-        self.analysis_worker.moveToThread(self.analysis_thread)
-        
-        self.analysis_thread.started.connect(self.analysis_worker.run)
-        self.analysis_worker.finished.connect(lambda r, p, f: self.on_analysis_finished(comp, r, p, f))
-        
-        # Proper strictly-sequenced cleanup
-        self.analysis_worker.finished.connect(self.analysis_thread.quit)
-        self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
-        self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
-        self.analysis_thread.finished.connect(self.clear_thread_refs)
-        
-        self.analysis_thread.start()
-
-    def clear_thread_refs(self):
-        """Nullify references to allow GC and avoid RuntimeError."""
-        self.analysis_thread = None
-        self.analysis_worker = None
-
-    def on_analysis_finished(self, comp, report, preview, full_res):
-        print(report)
-        self.update_detector_view(comp, preview, full_res)
 
 class ZoomableView(QGraphicsView):
     def __init__(self, scene):
