@@ -2,7 +2,7 @@ import numpy as np
 import logging
 
 # Local imports (Moving to top to avoid isinstance issues with dynamic loading)
-from components import PointSource, BeamSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter
+from components import PointSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter
 
 # Configure logging
 logging.basicConfig(
@@ -19,8 +19,8 @@ class Ray:
 		self.direction = np.array(direction, dtype=float)
 		self.direction /= np.linalg.norm(self.direction)
 		self.wavelength = wavelength # nm
-		self.points = [self.origin[:2]] # XY projections for 2D UI
-		self.z_hits = [self.origin[2]] # Z coordinates track
+		self.points = [self.origin[:2].copy()] # XY projections for 2D UI
+		self.points_3d = [self.origin.copy()] # Z coordinates track
 		self.hitted_components = [] # For analysis
 		self.alive = True
 
@@ -57,25 +57,15 @@ class OpticalSystem:
 		all_trace_queue = deque() # Queue for BFS
 		
 		# --- LAYER 1: GUI RAYS (DETERMINISTIC) ---
-		for src in [c for c in self.components if isinstance(c, (PointSource, BeamSource))]:
+		for src in [c for c in self.components if isinstance(c, PointSource)]:
 			n_gui = src.params.get("n_rays", 21)
 			wl = src.params.get("wavelength", 532.0)
 			rad_base = np.radians(src.angle)
-			
-			if isinstance(src, PointSource):
-				div_ang = src.params.get("angle_range", 0.1)
-				for a in np.linspace(-div_ang/2, div_ang/2, n_gui):
-					ray_dir = [np.cos(rad_base + a), np.sin(rad_base + a), 0.0]
-					ray = Ray([src.x, src.y, 0.0], ray_dir, wavelength=wl)
-					self.rays.append(ray)
-			else: # BeamSource
-				width = src.params.get("width", 0.1)
-				nx, ny = np.cos(rad_base), np.sin(rad_base)
-				tx, ty = -ny, nx
-				for offset in np.linspace(-width/2, width/2, n_gui):
-					origin = np.array([src.x, src.y, 0.0]) + np.array([tx*offset, ty*offset, 0.0])
-					ray = Ray(origin, [nx, ny, 0.0], wavelength=wl)
-					self.rays.append(ray)
+			div_ang = src.params.get("angle_range", 0.1)
+			for a in np.linspace(-div_ang/2, div_ang/2, n_gui):
+				ray_dir = [np.cos(rad_base + a), np.sin(rad_base + a), 0.0]
+				ray = Ray([src.x, src.y, 0.0], ray_dir, wavelength=wl)
+				self.rays.append(ray)
 
 		# Process all rays
 		for r in self.rays:
@@ -186,7 +176,7 @@ class OpticalSystem:
 			hitted_comp = None
 			
 			for comp in self.components:
-				if isinstance(comp, (PointSource, BeamSource)): continue
+				if isinstance(comp, PointSource): continue
 				
 				# Simplified collision: Treat everything as infinite line for math
 				# but bound by component radius/size visually.
@@ -213,6 +203,7 @@ class OpticalSystem:
 			if hitted_comp:
 				# Add XY projection for 2D UI
 				ray.points.append(closest_hit[:2])
+				ray.points_3d.append(closest_hit)
 				ray.hitted_components.append(hitted_comp)
 				ray.origin = closest_hit # Update 3D ray start for next segment
 				
@@ -289,12 +280,22 @@ class OpticalSystem:
 						continue
 
 				elif isinstance(hitted_comp, Aperture):
+					# Axis rays must pass through to find the detector downstream
+					if getattr(ray, '_is_axis', False):
+						ray.origin = closest_hit
+						continue
+						
 					r_stop = hitted_comp.params.get("r", 0.05)
 					dist_3d = np.linalg.norm(closest_hit - np.array([hitted_comp.x, hitted_comp.y, 0.0]))
 					if dist_3d > r_stop:
 						ray.alive = False
 						break
-				elif hitted_comp.__class__.__name__ == "HighPassFilter": # Dynamic check for new type
+				elif hitted_comp.__class__.__name__ == "HighPassFilter":
+					# Axis rays must be invisible to blockers to trace the full 4f path
+					if getattr(ray, '_is_axis', False):
+						ray.origin = closest_hit
+						continue
+						
 					r_stop = hitted_comp.params.get("r", 0.01)
 					dist_3d = np.linalg.norm(closest_hit - np.array([hitted_comp.x, hitted_comp.y, 0.0]))
 					if dist_3d < r_stop: # Block central rays
@@ -312,7 +313,7 @@ class OpticalSystem:
 
 	def get_axis_path(self):
 		"""Calculates the main optical axis path (starts from the first source)."""
-		src = next((c for c in self.components if isinstance(c, (PointSource, BeamSource))), None)
+		src = next((c for c in self.components if isinstance(c, PointSource)), None)
 		
 		# Axis starts from source position and follows its main emission direction
 		if src:

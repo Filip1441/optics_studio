@@ -1,7 +1,7 @@
 import numpy as np
 import json
 import LightPipes as lp
-from components import PointSource, BeamSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter
+from components import PointSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter, TestTarget
 from optics_engine import Ray
 
 
@@ -19,7 +19,7 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 	report.append("="*95)
 
 	# ── 1. Find source ──────────────────────────────────────────────
-	src = next((c for c in system.components if isinstance(c, (PointSource, BeamSource))), None)
+	src = next((c for c in system.components if isinstance(c, PointSource)), None)
 	if not src:
 		msg = "Error: No light source found in system."
 		print(msg)
@@ -49,43 +49,33 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 		return None, None
 
 	# ── 3. Source parameters ────────────────────────────────────────
-	N = 1024  # Grid resolution — fast for interactive use
+	N = 2048  # High resolution as requested
 
 	# Detector size determines the final interpolation window
 	det_size_mm = detect_comp.params.get('size', 10.0)
 	det_size_m = det_size_mm * MM
 
-	if isinstance(src, BeamSource):
-		src_width_m = src.params.get('width', 10.0) * MM
-		current_div = 0.001  # near-collimated
-		# Start grid slightly larger than beam
-		curr_l = max(0.001, src_width_m * 3.0)
-		F = lp.Begin(curr_l, wvl, N)
-		F = lp.RectAperture(src_width_m, src_width_m, 0, 0, 0, F)
-		report.append(f"\n[SOURCE: Collimated Beam]")
-		report.append(f"  > Width: {src_width_m*1000:.2f} mm")
+	# Point source — extract divergence angle
+	angle_range_rad = src.params.get('angle_range', 0.4)
+	angle_deg = np.degrees(angle_range_rad)
+	# Pinhole size from divergence: w0 = λ / (π * θ_half) 
+	theta_half = angle_range_rad / 2.0
+	if theta_half > 0:
+		pinhole_m = wvl / (np.pi * theta_half)
 	else:
-		# Point source — extract divergence angle
-		angle_range_rad = src.params.get('angle_range', 0.4)
-		angle_deg = np.degrees(angle_range_rad)
-		# Pinhole size from divergence: w0 = λ / (π * θ_half) 
-		theta_half = angle_range_rad / 2.0
-		if theta_half > 0:
-			pinhole_m = wvl / (np.pi * theta_half)
-		else:
-			pinhole_m = 0.001
-		current_div = angle_deg
+		pinhole_m = 0.001
+	current_div = angle_deg
 
-		# SmartGrid: start with Nyquist-safe grid
-		nyq_l = (wvl * N) / (2 * np.sin(max(theta_half, 1e-6)))
-		curr_l = min(0.005, nyq_l * 0.5)
-		curr_l = max(curr_l, 0.0005)  # at least 0.5mm
+	# SmartGrid: start with Nyquist-safe grid
+	nyq_l = (wvl * N) / (2 * np.sin(max(theta_half, 1e-6)))
+	curr_l = min(0.005, nyq_l * 0.5)
+	curr_l = max(curr_l, 0.0005)  # at least 0.5mm
 
-		F = lp.Begin(curr_l, wvl, N)
-		F = lp.GaussAperture(pinhole_m, 0, 0, 1, F)
-		report.append(f"\n[SOURCE: Point / Diverging]")
-		report.append(f"  > Divergence: {angle_deg:.3f}°")
-		report.append(f"  > Pinhole:    {pinhole_m*1e6:.2f} µm")
+	F = lp.Begin(curr_l, wvl, N)
+	F = lp.GaussAperture(pinhole_m, 0, 0, 1, F)
+	report.append(f"\n[SOURCE: Point / Diverging]")
+	report.append(f"  > Divergence: {angle_deg:.3f}°")
+	report.append(f"  > Pinhole:    {pinhole_m*1e6:.2f} µm")
 
 	report.append(f"  > Wavelength: {wavelength_nm:.1f} nm")
 	report.append(f"  > Grid:       {N}x{N}, L_start={curr_l*1000:.3f} mm")
@@ -144,8 +134,16 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 		elif isinstance(comp, Aperture):
 			r_mm = comp.params.get('r', 5.0)
 			r_m = r_mm * MM
-			F = lp.CircAperture(r_m, 0, 0, F)
-			action_str = f"CircAperture R={r_mm:.1f}mm"
+			shape = comp.params.get('shape', 'Circular')
+			if shape == 'Square':
+				F = lp.RectAperture(r_m*2, r_m*2, 0, 0, 0, F)
+			elif shape == 'Gaussian':
+				x = np.linspace(-curr_l/2, curr_l/2, N)
+				X, Y = np.meshgrid(x, x)
+				F.field = F.field * np.exp(-(X**2 + Y**2) / (2 * r_m**2))
+			else: # Default Circular
+				F = lp.CircAperture(r_m, 0, 0, F)
+			action_str = f"Aperture [{shape}] R={r_mm:.2f}mm"
 
 		elif isinstance(comp, HighPassFilter):
 			r_mm = comp.params.get('r', 1.0)
@@ -181,6 +179,22 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 			# Mirror: in wave optics on-axis, it's just a reflection (no phase change for flat)
 			action_str = f"Mirror (pass-through)"
 
+		elif isinstance(comp, TestTarget):
+			s_m = comp.params.get('size', 5.0) * MM
+			x = np.linspace(-curr_l / 2, curr_l / 2, N)
+			X, Y = np.meshgrid(x, x)
+			# Letter 'F' Mask logic from optical_cli.py
+			mask = np.zeros_like(X, dtype=bool)
+			# Vertical stem
+			mask |= (X > -s_m/4) & (X < -s_m/8) & (np.abs(Y) < s_m/2)
+			# Top bar
+			mask |= (Y > s_m/4) & (Y < s_m/2) & (X > -s_m/8) & (X < s_m/4)
+			# Middle bar
+			mask |= (np.abs(Y) < s_m/10) & (X > -s_m/8) & (X < s_m/8)
+			
+			F.field = F.field * mask.astype(float)
+			action_str = f"Test Target 'F' (size={comp.params.get('size'):.1f}mm)"
+
 		report.append(f"{cumulative_mm:<8.3f} | {visit['dist_mm']:<7.3f} | {comp.name:<15} | {curr_l*1000:<10.3f} | {action_str}")
 
 		if comp == detect_comp:
@@ -190,25 +204,49 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 	if cancel_check and cancel_check():
 		return None, None
 
-	F = lp.Interpol(det_size_m, N, 0, 0, 0, F)
+	# If the beam misses the detector completely, return empty
+	if detect_comp not in axis_ray.hitted_components:
+		return np.zeros((N, N), dtype=np.uint8), report
+
+	# Calculate offset between axial ray and detector center
+	idx = axis_ray.hitted_components.index(detect_comp)
+	hit_pt = axis_ray.points_3d[idx+1]
+	det_pos = np.array([detect_comp.x, detect_comp.y, 0.0])
+	
+	# Detector local orientation
+	angle_rad = np.radians(detect_comp.angle)
+	n = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
+	v_y = np.array([-n[1], n[0], 0.0]) # Tangent in XY plane
+	v_z = np.array([0.0, 0.0, 1.0])    # Binormal (Z)
+
+	# Transverse offsets in meters
+	dx_m = np.dot(hit_pt - det_pos, v_y) * MM
+	dy_m = np.dot(hit_pt - det_pos, v_z) * MM
+
+	# Interpolate with shift (-dx, -dy) to center the detector window on its physical location
+	F = lp.Interpol(det_size_m, N, -dx_m, -dy_m, 0, F)
 	intensity = lp.Intensity(0, F)
 
-	# Downsample if needed for fast UI rendering
-	out_res = 512
-	if N > out_res:
-		step = N // out_res
-		intensity = intensity[::step, ::step]
-
-	# Normalize to uint8
-	i_max = intensity.max()
-	if i_max > 0:
-		img_norm = (intensity / i_max * 255).astype(np.uint8)
+	# Normalize to uint8 with optional log scale
+	if detect_comp.params.get('log_scale', False):
+		# Log scale normalization
+		intensity = np.log10(intensity + 1e-9)
+		i_min, i_max = intensity.min(), intensity.max()
+		if i_max > i_min:
+			img_norm = ((intensity - i_min) / (i_max - i_min) * 255).astype(np.uint8)
+		else:
+			img_norm = np.zeros((N, N), dtype=np.uint8)
 	else:
-		img_norm = np.zeros((out_res, out_res), dtype=np.uint8)
+		# Linear scale normalization
+		i_max = intensity.max()
+		if i_max > 0:
+			img_norm = (intensity / i_max * 255).astype(np.uint8)
+		else:
+			img_norm = np.zeros((N, N), dtype=np.uint8)
 
 	report.append("-" * 95)
 	report.append(f"  Final grid interpolated to {det_size_mm:.1f}mm detector")
-	report.append(f"  Peak intensity: {i_max:.4e}")
+	report.append(f"  Peak intensity: {intensity.max():.4e}")
 	report.append(f"✓ LightPipes analysis complete.")
 	report.append("=" * 95 + "\n")
 

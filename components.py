@@ -82,19 +82,18 @@ class Aperture(OpticalComponent):
 	"""An opening that clips rays outside its radius."""
 	def __init__(self, x=0, y=0, angle=0, r=5.0):
 		super().__init__(x, y, angle, "Aperture")
-		self.params = {"r": r}
-
-class BeamSource(OpticalComponent):
-	"""Source that emits parallel rays (collimated beam)."""
-	def __init__(self, x=0, y=0, angle=0, width=10.0):
-		super().__init__(x, y, angle, "Beam Source")
-		self.params = {"n_rays": 11, "width": width, "r": 5.0, "wavelength": 532.0}
+		self.params = {"r": r, "shape": "Circular"}
 
 class ArrowObject(OpticalComponent):
 	"""Placeholder for V3. Acts as a collection of point sources or decorative."""
 	def __init__(self, x=0, y=0, angle=0):
 		super().__init__(x, y, angle, "Arrow")
 		self.params = {"r": 10.0}
+
+class TestTarget(OpticalComponent):
+	def __init__(self, x=0, y=0, angle=0):
+		super().__init__(x, y, angle, "Target")
+		self.params = {"size": 5.0}
 
 class HighPassFilter(OpticalComponent):
 	"""Blocks central rays (DC component) providing edge enhancement."""

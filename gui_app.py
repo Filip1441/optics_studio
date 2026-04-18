@@ -24,6 +24,15 @@ import logging
 logger = logging.getLogger("SimulatorApp")
 logger.setLevel(logging.WARNING)
 
+class SaveWorker(QRunnable):
+    def __init__(self, pixmap, path):
+        super().__init__()
+        self.pixmap = pixmap
+        self.path = path
+    def run(self):
+        self.pixmap.save(self.path)
+        logger.info(f"Worker: Saved to {self.path}")
+
 class AnalysisSignals(QObject):
     finished = pyqtSignal(object)
 
@@ -190,8 +199,18 @@ class VisualComponent(QGraphicsItem):
         super().hoverLeaveEvent(event)
 
     def boundingRect(self):
-        r_px = self.component.params.get("r", 12.5) * 5.0
-        return QRectF(-r_px - 20, -r_px - 40, 2*r_px + 40, 2*r_px + 80)
+        # Calculate vertical reach (ri) based on component type
+        if isinstance(self.component, Detector):
+            size_mm = self.component.params.get("size", 10.0)
+            ri = (size_mm / 2.0) * 5.0
+        else:
+            r_mm = self.component.params.get("r", 12.5)
+            ri = r_mm * 5.0
+            
+        # Return a much tighter box: 
+        # width from -15 to +15 (covering lens thickness/detector body)
+        # height covering the full radius + small margin
+        return QRectF(-15, -ri - 5, 30, 2 * ri + 10)
 
     def paint(self, painter, option, widget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -240,21 +259,22 @@ class VisualComponent(QGraphicsItem):
             for i in np.arange(-ri, ri+1, 10):
                 ii = int(i)
                 painter.drawLine(0, ii, -5, ii+5)
+        elif isinstance(self.component, TestTarget):
+            # Draw a visual letter 'F' in the scene
+            painter.setPen(QPen(QColor(255, 255, 100), 2))
+            s = self.component.params.get('size', 5.0) * 2.5 # adjust for scene scale
+            painter.drawLine(-2, -s, -2, s) # Stem
+            painter.drawLine(-2, -s, 3, -s) # Top
+            painter.drawLine(-2, 0, 1, 0)   # Mid
         elif isinstance(self.component, PointSource):
             painter.setBrush(QBrush(QColor(255, 50, 50)))
             painter.drawEllipse(-6, -6, 12, 12)
             # Directional line
             painter.setPen(QPen(Qt.GlobalColor.white, 2))
             painter.drawLine(0, 0, 10, 0)
-        elif isinstance(self.component, BeamSource):
-            painter.setBrush(QBrush(QColor(255, 50, 50, 150)))
-            w_px = self.component.params.get('width', 10.0) * 5.0
-            painter.drawRect(-3, -w_px/2, 6, w_px)
-            # Directional arrow
-            painter.setPen(QPen(Qt.GlobalColor.white, 1))
-            painter.drawLine(0, 0, 10, 0)
-            painter.drawLine(10, 0, 7, -3)
-            painter.drawLine(10, 0, 7, 3)
+        elif isinstance(self.component, (Lens, Grating, HighPassFilter, Aperture)):
+            # Draw shared logic if any, or skip to specific
+            pass
         elif isinstance(self.component, Aperture):
             # Aperture: Two blocks with a gap of 2*r
             painter.setPen(QPen(QColor(150, 150, 150), 4))
@@ -301,18 +321,26 @@ class VisualComponent(QGraphicsItem):
             painter.setPen(QPen(QColor(255, 100, 100), 1))
             painter.drawEllipse(-3, -int(block_r), 6, int(2*block_r))
         elif isinstance(self.component, Detector):
-            # Scientific Camera Shape: Body + Sensor housing
-            painter.setPen(QPen(QColor(100, 116, 139), 2)) # Blue-gray metallic
-            ri = int(round(r))
-            # Camera Body (Back)
+            # Facing LEFT by default to meet light from -X
+            painter.setPen(QPen(QColor(148, 163, 184), 1))
+            size_mm = self.component.params.get("size", 10.0)
+            ri = int(round((size_mm / 2.0) * 5.0))
+            
+            # 1. Main Case (Back) - positioned on the Right
+            painter.setBrush(QBrush(QColor(15, 23, 42)))
+            painter.drawRect(2, -ri-4, 12, 2*ri+8)
+            
+            # 2. Sensor Mounting - positioned on the Left
             painter.setBrush(QBrush(QColor(30, 41, 59)))
-            painter.drawRect(-12, -ri, 6, 2*ri)
-            # Sensor Front Plate
-            painter.setBrush(QBrush(QColor(51, 65, 85)))
-            painter.drawRect(-6, -ri, 12, 2*ri)
-            # Sensor Slot (Visual line)
-            painter.setPen(QPen(QColor(100, 255, 100, 150), 1))
-            painter.drawLine(0, -ri+5, 0, ri-5)
+            painter.drawRect(-10, -ri, 12, 2*ri)
+            
+            # 3. CCD/CMOS Active Surface (the green line is the actual sensor plane)
+            painter.setPen(QPen(QColor(34, 197, 94), 3))
+            painter.drawLine(-10, -ri+2, -10, ri-2)
+            
+            # 4. Small lens mount detail
+            painter.setBrush(QBrush(QColor(71, 85, 105)))
+            painter.drawRect(-14, int(-ri/2), 4, int(ri))
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
@@ -414,8 +442,8 @@ class PropertyPanel(QWidget):
         # Detector Sensor Area
         self.sensor_label = QLabel("Click to see sensor")
         self.sensor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sensor_label.setStyleSheet("background: #000; border: 1px solid #444; border-radius: 4px; margin-top: 10px;")
-        self.sensor_label.setFixedSize(240, 160)
+        self.sensor_label.setFixedSize(280, 280)
+        self.sensor_label.setStyleSheet("border: 2px solid #3d5afe; border-radius: 4px; background: #000;")
         self.layout.addWidget(self.sensor_label)
         self.sensor_label.hide()
         
@@ -436,7 +464,7 @@ class PropertyPanel(QWidget):
         self.angle_spin.setValue(comp.angle)
         
         # Adjust label for sources
-        label_text = "Emission Direction" if isinstance(comp, (PointSource, BeamSource)) else "Rotation"
+        label_text = "Emission Direction" if isinstance(comp, PointSource) else "Rotation"
         self.form.labelForField(self.angle_spin).setText(label_text)
         
         # Clear specific form
@@ -453,29 +481,22 @@ class PropertyPanel(QWidget):
             f_spin.valueChanged.connect(lambda v: self.apply_param('f', v))
             self.specific_form.addRow("Focal Length", f_spin)
         
-        # 2. Source specifics (Rays, Width, Angle)
-        if isinstance(comp, (PointSource, BeamSource)):
+        # 2. Source specifics (Rays, Angle)
+        if isinstance(comp, PointSource):
             nr_spin = QDoubleSpinBox()
             nr_spin.setRange(1, 100)
             nr_spin.setDecimals(0)
             nr_spin.setValue(comp.params.get('n_rays', 21))
             nr_spin.valueChanged.connect(lambda v: self.apply_param('n_rays', int(v)))
             self.specific_form.addRow("Num Rays", nr_spin)
-            if isinstance(comp, BeamSource):
-                w_spin = QDoubleSpinBox()
-                w_spin.setRange(0.1, 500.0)
-                w_spin.setSuffix(" mm")
-                w_spin.setValue(comp.params.get('width', 10.0))
-                w_spin.valueChanged.connect(lambda v: self.apply_param('width', v))
-                self.specific_form.addRow("Beam Width", w_spin)
-            else:
-                ar_spin = QDoubleSpinBox()
-                ar_spin.setRange(1, 360)
-                ar_spin.setSuffix(" °")
-                current_deg = np.degrees(comp.params.get('angle_range', 0.1))
-                ar_spin.setValue(current_deg)
-                ar_spin.valueChanged.connect(lambda v: self.apply_param('angle_range', np.radians(v)))
-                self.specific_form.addRow("Fan Angle", ar_spin)
+
+            ar_spin = QDoubleSpinBox()
+            ar_spin.setRange(1, 360)
+            ar_spin.setSuffix(" °")
+            current_deg = np.degrees(comp.params.get('angle_range', 0.1))
+            ar_spin.setValue(current_deg)
+            ar_spin.valueChanged.connect(lambda v: self.apply_param('angle_range', np.radians(v)))
+            self.specific_form.addRow("Fan Angle", ar_spin)
             
             wl_spin = QDoubleSpinBox()
             wl_spin.setRange(380, 780)
@@ -485,14 +506,24 @@ class PropertyPanel(QWidget):
             self.specific_form.addRow("Wavelength", wl_spin)
 
         # 3. Diameter / Radius control (Only for valid targets)
-        if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter)):
-            r_spin = QDoubleSpinBox()
-            r_spin.setRange(0.1, 500.0)
-            r_spin.setSuffix(" mm")
-            label = "Opening (R)" if isinstance(comp, Aperture) else "Radius (R)"
-            self.specific_form.addRow(label, r_spin)
-            r_spin.setValue(comp.params.get('r', 12.5))
-            r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
+        if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter, TestTarget)):
+            if not isinstance(comp, Detector):
+                r_spin = QDoubleSpinBox()
+                r_spin.setRange(0.0, 500.0)
+                r_spin.setDecimals(6)
+                r_spin.setSuffix(" mm")
+                label = "Opening (R)" if isinstance(comp, Aperture) else "Radius (R)"
+                if isinstance(comp, TestTarget): label = "Size"
+                self.specific_form.addRow(label, r_spin)
+                r_spin.setValue(comp.params.get('r', 12.5) if not isinstance(comp, TestTarget) else comp.params.get('size', 5.0))
+                r_spin.valueChanged.connect(lambda v: self.apply_param('r' if not isinstance(comp, TestTarget) else 'size', v))
+
+        # 3b. Aperture Shape
+        if isinstance(comp, Aperture):
+            sh_combo = self.app.add_combo_to_form(self.specific_form, "Shape", 
+                                                 ["Circular", "Square", "Gaussian"], 
+                                                 comp.params.get('shape', 'Circular'),
+                                                 lambda v: self.apply_param('shape', v))
 
         # 4. Grating Density & Preview Logic
         if isinstance(comp, Grating):
@@ -521,20 +552,26 @@ class PropertyPanel(QWidget):
             self.specific_form.addRow("Rays Per Order:", rpo_spin)
 
         
-        # 5. Detector specifics (Spectral View)
-        if isinstance(comp, Detector):
-            s_spin = QDoubleSpinBox()
-            s_spin.setRange(0.1, 500.0)
-            s_spin.setSuffix(" mm")
-            s_spin.setValue(comp.params.get('size', 10.0))
-            s_spin.valueChanged.connect(lambda v: self.apply_param('size', v))
-            self.specific_form.addRow("Detector Size", s_spin)
+        # 5. Detector & Target specifics (Size)
+        if isinstance(comp, (Detector, TestTarget)):
+            if isinstance(comp, Detector):
+                s_spin = QDoubleSpinBox()
+                s_spin.setRange(0.1, 500.0)
+                s_spin.setSuffix(" mm")
+                s_spin.setValue(comp.params.get('size', 10.0))
+                s_spin.valueChanged.connect(lambda v: self.apply_param('size', v))
+                self.specific_form.addRow("Detector Size", s_spin)
 
-            spec_check = QCheckBox("Spectral Analysis (Fourier)")
-            spec_check.setStyleSheet("color: #3d5afe; font-weight: bold;")
-            spec_check.setChecked(comp.params.get('spectral_view', False))
-            spec_check.toggled.connect(lambda v: self.apply_param('spectral_view', v))
-            self.specific_form.addRow(spec_check)
+                log_check = QCheckBox("Logarithmic Intensity Scale")
+                log_check.setStyleSheet("color: #3d5afe; font-weight: bold;")
+                log_check.setChecked(comp.params.get('log_scale', False))
+                log_check.toggled.connect(lambda v: self.apply_param('log_scale', v))
+                self.specific_form.addRow(log_check)
+                
+                save_btn = QPushButton("Save Intensity Snapshot")
+                save_btn.setStyleSheet("background: #2e7d32;")
+                save_btn.clicked.connect(lambda: self.save_detector_snapshot(comp))
+                self.specific_form.addRow(save_btn)
 
         del_btn = QPushButton("Delete Component")
         del_btn.setStyleSheet("background: #f44336;")
@@ -568,14 +605,46 @@ class PropertyPanel(QWidget):
         noise_arr, report_text = result
         # Result received from background thread
         h, w = noise_arr.shape
-        qimg = QImage(noise_arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+        
+        # 1. Get wavelength color (using pre-existing unified function)
+        src = next((c for c in self.app.system.components if isinstance(c, (PointSource, BeamSource))), None)
+        wvl = src.params.get('wavelength', 532.0) if src else 532.0
+        color = wavelength_to_color(wvl)
+        r_m, g_m, b_m = color.red(), color.green(), color.blue()
+        
+        # 2. Colorize: Greyscale -> RGB
+        rgb_data = np.zeros((h, w, 3), dtype=np.uint8)
+        norm_noise = noise_arr.astype(float) / 255.0
+        rgb_data[..., 0] = (norm_noise * r_m).astype(np.uint8)
+        rgb_data[..., 1] = (norm_noise * g_m).astype(np.uint8)
+        rgb_data[..., 2] = (norm_noise * b_m).astype(np.uint8)
+        
+        # 3. Create QImage (must copy because numpy array will be GC'd)
+        qimg = QImage(rgb_data.data, w, h, w*3, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qimg)
         
-        # Scale to fit fixed sensor label size (240x160)
-        scaled_pixmap = pixmap.scaled(240, 160, Qt.AspectRatioMode.KeepAspectRatio)
+        # Scale to fit fixed sensor label size (280x280)
+        scaled_pixmap = pixmap.scaled(280, 280, Qt.AspectRatioMode.KeepAspectRatio)
         self.sensor_label.setPixmap(scaled_pixmap)
-        self.sensor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sensor_label.setStyleSheet("border: 2px solid #3d5afe; border-radius: 4px; margin-top: 10px;")
+        
+        # Store latest result for saving (full res)
+        self.last_img_pixmap = pixmap
+
+    def save_detector_snapshot(self, comp):
+        if not hasattr(self, 'last_img_pixmap') or self.last_img_pixmap.isNull():
+            return
+        
+        size = comp.params.get('size', 10.0)
+        import datetime
+        ts = datetime.datetime.now().strftime("%H%M%S")
+        filename = f"detector_{size}mm_{ts}.png"
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save Detector Snapshot", filename, "Images (*.png)")
+        if path:
+            # Use background worker for saving
+            worker = SaveWorker(self.last_img_pixmap, path)
+            QThreadPool.globalInstance().start(worker)
+            logger.info(f"UI: Background save started for {path}")
 
     def apply_changes(self):
         items = self.app.scene.selectedItems()
@@ -588,14 +657,34 @@ class PropertyPanel(QWidget):
         vcomp.component.angle = self.angle_spin.value()
         vcomp.refresh_pos()
         self.app.update_rays()
+        
+        if isinstance(vcomp.component, Detector):
+            self.update_detector_view(vcomp.component)
+            
         self._syncing = False
 
     def apply_param(self, key, val):
         items = self.app.scene.selectedItems()
         if not items: return
-        items[0].component.params[key] = val
-        logger.info(f"UI: Property '{key}' updated for {items[0].component.uid} to {val}")
+        comp = items[0].component
+        comp.params[key] = val
+        logger.info(f"UI: Property '{key}' updated for {comp.uid} to {val}")
+        
+        # 1. Update rays and reflections
         self.app.update_rays()
+        
+        # 2. Trigger analysis refresh if we're dealing with a Detector
+        # OR if any parameter change might affect the current detector's view
+        if isinstance(comp, Detector):
+            self.update_detector_view(comp)
+            # If size changed, we also need to redraw its shape in the GUI
+            items[0].update() # Force redraw of the visual component
+        else:
+            # Check if there's an active detector being viewed that needs refresh
+            # because some other component (like a lens) changed
+            current_selection = self.app.scene.selectedItems()
+            if current_selection and isinstance(current_selection[0].component, Detector):
+                self.update_detector_view(current_selection[0].component)
 
 class ZoomableView(QGraphicsView):
     def __init__(self, scene):
@@ -655,7 +744,7 @@ class ZoomableView(QGraphicsView):
 class SimulatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Optics Studio")
+        self.setWindowTitle("Stockholm")
         self.resize(1400, 900)
         self.setStyleSheet(DARK_THEME)
         
@@ -673,32 +762,33 @@ class SimulatorApp(QMainWindow):
         
         # Side Dock
         self.dock = QDockWidget("Engineering View", self)
+        self.dock.setMinimumWidth(320)
         self.props_panel = PropertyPanel(self)
         self.dock.setWidget(self.props_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
 
         self.setup_ui()
-        self.init_demo()
+        self.load_default_scene()
         self.wave_engine = WaveEngine(res=256, size=0.03) # Real-time Wave Core
 
     def setup_ui(self):
-        # ...
         toolbar = QToolBar("Toolbox")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         
         def add_action(text, icon_text, cb):
-            a = QAction(text, self)
+            a = QAction(f"{icon_text} {text}", self)
             a.triggered.connect(cb)
             toolbar.addAction(a)
             return a
 
-        add_action("Lens", "L", lambda: self.add_comp(Lens(0, 0, 0)))
-        add_action("Mirror", "M", lambda: self.add_comp(Mirror(50, 0, 45)))
-        add_action("Grating", "G", lambda: self.add_comp(Grating(50, 0, 0)))
+        # Components
+        add_action("Lens", "👓", lambda: self.add_comp(Lens(0, 0, 0)))
+        add_action("Mirror", "🪞", lambda: self.add_comp(Mirror(50, 0, 45)))
+        add_action("Grating", "🏁", lambda: self.add_comp(Grating(50, 0, 0)))
+        add_action("Target", "🅰", lambda: self.add_comp(TestTarget(0, 0, 0)))
+        add_action("Aperture", "⭕", lambda: self.add_comp(Aperture(50, 0, 0)))
         add_action("High-Pass", "HP", lambda: self.add_comp(HighPassFilter(50, 0, 0)))
         add_action("Fan Src", "S", lambda: self.add_comp(PointSource(-80, 0, 0)))
-        add_action("Beam Src", "B", lambda: self.add_comp(BeamSource(-80, -20, 0)))
-        add_action("Aperture", "A", lambda: self.add_comp(Aperture(50, 0, 0)))
         add_action("Detector", "D", lambda: self.add_comp(Detector(120, 0, 0)))
         
         toolbar.addSeparator()
@@ -721,6 +811,19 @@ class SimulatorApp(QMainWindow):
         for item in self.scene.items():
             if isinstance(item, VisualComponent):
                 item.handle.setVisible(item.isSelected())
+
+    def load_default_scene(self):
+        default_path = os.path.join(os.getcwd(), "starting_setup.json")
+        if os.path.exists(default_path):
+            self.scene_manager.load(default_path)
+            # Clear and rebuild scene
+            self.scene.clear()
+            for comp in self.system.components:
+                self.scene.addItem(VisualComponent(comp, self))
+            self.update_rays()
+            logger.info("UI: Loaded default scene from starting_setup.json")
+        else:
+            self.init_demo()
 
     def init_demo(self):
         # Collimator Setup (Default)
@@ -798,6 +901,13 @@ class SimulatorApp(QMainWindow):
     def load_scene(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Scene", "", "JSON Files (*.json)")
         if path:
+            # Important: Clear rays BEFORE scene items to avoid dangling pointers
+            for item in self.ray_items:
+                if item.scene():
+                    try: self.scene.removeItem(item)
+                    except: pass
+            self.ray_items.clear()
+            
             self.scene_manager.load(path)
             self.scene.clear()
             for comp in self.system.components:

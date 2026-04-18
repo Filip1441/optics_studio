@@ -14,11 +14,11 @@ class SceneManager:
 			"Lens": Lens,
 			"Mirror": Mirror,
 			"Detector": Detector,
-			"BeamSource": BeamSource,
 			"Aperture": Aperture,
 			"Grating": Grating,
 			"HighPassFilter": HighPassFilter,
-			"ArrowObject": ArrowObject
+			"ArrowObject": ArrowObject,
+			"TestTarget": TestTarget
 		}
 
 	@property
