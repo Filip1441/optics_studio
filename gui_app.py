@@ -7,8 +7,39 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView,
                              QLabel, QFormLayout, QPushButton, QFileDialog,
                              QGraphicsPathItem, QMenu, QHBoxLayout, QFrame,
                              QScrollArea, QDockWidget, QCheckBox, QGroupBox, QSpinBox)
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QRectF, QRect, QPointF, pyqtSignal, QEvent, QTimer, QThread, QObject
 from PyQt6.QtGui import QPen, QBrush, QColor, QAction, QPainterPath, QTransform, QPainter, QFont, QPixmap, QRadialGradient, QImage
+
+class AnalysisWorker(QObject):
+    finished = pyqtSignal(str, QImage, object) # report, preview_image, full_res_data
+    def __init__(self, system, color):
+        super().__init__()
+        self.system = system
+        self.color = color
+    def run(self):
+        report, image_data = self.system.analyze_system()
+        
+        # 1. Prepare Preview (256x256)
+        h_orig, w_orig = image_data.shape
+        display_res = 256
+        step = max(1, h_orig // display_res)
+        small_data = image_data[::step, ::step]
+        h, w = small_data.shape
+        img_uint8 = (small_data * 255).astype(np.uint8)
+        
+        # 2. Color Mapping in Background Thread
+        preview_image = QImage(w, h, QImage.Format.Format_RGB32)
+        for y in range(h):
+            for x in range(w):
+                v = int(img_uint8[y, x])
+                px_color = QColor(
+                    int(self.color.red() * v / 255),
+                    int(self.color.green() * v / 255),
+                    int(self.color.blue() * v / 255)
+                )
+                preview_image.setPixelColor(x, y, px_color)
+        
+        self.finished.emit(report, preview_image, image_data)
 
 import numpy as np
 
@@ -20,6 +51,7 @@ from wave_engine import WaveEngine
 from scipy.fft import fft2, fftshift
 
 import logging
+from threading import Thread
 logger = logging.getLogger("SimulatorApp")
 logger.setLevel(logging.WARNING)
 
@@ -357,6 +389,19 @@ class PropertyPanel(QWidget):
         self.label.setStyleSheet("font-size: 14px; color: #3d5afe; font-weight: bold; margin-bottom: 20px;")
         self.layout.addWidget(self.label)
         
+        # Form layouts
+        self.form_layout = QFormLayout()
+        self.layout.addLayout(self.form_layout)
+        
+        # Async Analysis Infrastructure
+        self.analysis_thread = None
+        self.analysis_worker = None
+        
+        # Debounce timer for heavy analysis/wave calculations
+        self.analysis_timer = QTimer()
+        self.analysis_timer.setSingleShot(True)
+        self.analysis_timer.timeout.connect(self.trigger_delayed_analysis)
+        
         self.form = QFormLayout()
         self.layout.addLayout(self.form)
         
@@ -501,31 +546,76 @@ class PropertyPanel(QWidget):
         del_btn.clicked.connect(self.app.delete_selected)
         self.specific_form.addRow(del_btn)
         
-        # Update Sensor View if detector (Now dummy)
+        # Update Sensor View if detector (Now live analysis via thread)
         if isinstance(comp, Detector):
-            self.update_detector_view(comp)
-            # TRIGGER ANALYSIS PRINT TO TERMINAL
-            report = self.app.system.analyze_system()
-            print(report)
+            self.add_btn_to_form(self.specific_form, "Save High-Res Image", lambda: self.save_detector_image(comp))
+            # Trigger analysis via timer to keep UI snappy
+            self.analysis_timer.start(10)
         else:
             self.sensor_label.hide()
             
         self._syncing = False
 
-    def update_detector_view(self, comp):
+    def update_detector_view(self, comp, preview_image=None, full_res_data=None):
         if not self.sensor_label: return
         self.sensor_label.show()
         
-        # Purely black sensor area as per request
         W, H = 240, 160
         canvas = QPixmap(W, H)
         canvas.fill(QColor(0, 0, 0))
         painter = QPainter(canvas)
-        painter.setPen(QColor(50, 50, 50))
-        painter.drawText(10, 80, "Dummy Sensor - Check Terminal")
+        
+        if preview_image is not None:
+            comp._last_image = full_res_data
+            # Just draw the pre-rendered image! (Instant)
+            painter.drawImage(QRect(40, 0, 160, 160), preview_image)
+        else:
+            painter.setPen(QPen(QColor(50, 50, 50)))
+            painter.drawText(10, 80, "No Analysis Data")
+        
         painter.end()
         self.sensor_label.setPixmap(canvas)
-        self.sensor_label.setPixmap(canvas)
+
+    def add_btn_to_form(self, form, label, callback):
+        btn = QPushButton(label)
+        btn.clicked.connect(callback)
+        form.addRow(btn)
+        return btn
+
+    def save_detector_image(self, comp):
+        if not hasattr(comp, '_last_image'):
+            logger.error("No image data to save.")
+            return
+            
+        # Calculate real scale: mm per pixel
+        r_m = comp.params.get('r', 0.2)
+        diam_mm = r_m * 2000.0
+        mm_per_pixel = diam_mm / 2048.0
+        
+        # Open file dialog
+        default_name = f"detector_metrology_{mm_per_pixel:.6f}mm_per_pixel.png"
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Metrology Image", default_name, "PNG Files (*.png)")
+        
+        if filename:
+            h, w = comp._last_image.shape
+            img_uint8 = (comp._last_image * 255).astype(np.uint8)
+            
+            src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
+            wl_nm = src.params.get('wavelength', 532.0) if src else 532.0
+            qc = wavelength_to_color(wl_nm)
+            
+            # VECTORIZED SAVING - Extremely fast even for 2048x2048
+            buf = np.zeros((h, w, 4), dtype=np.uint8)
+            buf[..., 0] = (img_uint8 * qc.blue() / 255).astype(np.uint8)
+            buf[..., 1] = (img_uint8 * qc.green() / 255).astype(np.uint8)
+            buf[..., 2] = (img_uint8 * qc.red() / 255).astype(np.uint8)
+            buf[..., 3] = 255
+            
+            save_image = QImage(buf.data, w, h, QImage.Format.Format_RGB32)
+            if save_image.save(filename):
+                logger.info(f"Image saved to {filename}")
+            else:
+                logger.error("Failed to save image.")
 
     def apply_changes(self):
         items = self.app.scene.selectedItems()
@@ -548,9 +638,57 @@ class PropertyPanel(QWidget):
         logger.info(f"UI: Property '{key}' updated for {comp.uid} to {val}")
         self.app.update_rays()
         
-        # Trigger analysis print if it's a detector being modified
+        # Trigger analysis (throttled/debounced)
         if isinstance(comp, Detector):
-            print(self.app.system.analyze_system())
+            # Reset timer - analysis will run 500ms after last change
+            self.analysis_timer.start(500)
+
+    def trigger_delayed_analysis(self):
+        """Heavy analysis task triggered after interaction settles."""
+        # Cleanup any finished threads first to avoid dangling pointers
+        if self.analysis_thread is not None:
+            try:
+                # Check if C++ object still exists and is running
+                if self.analysis_thread.isRunning():
+                    return 
+            except RuntimeError:
+                # Object was deleted by Qt, null the reference
+                self.analysis_thread = None
+                self.analysis_worker = None
+
+        items = self.app.scene.selectedItems()
+        if not items: return
+        comp = items[0].component
+        if not isinstance(comp, Detector): return
+            
+        # Get current color for the background thread
+        src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
+        wl_nm = src.params.get('wavelength', 532.0) if src else 532.0
+        qc = wavelength_to_color(wl_nm)
+
+        self.analysis_thread = QThread()
+        self.analysis_worker = AnalysisWorker(self.app.system, qc)
+        self.analysis_worker.moveToThread(self.analysis_thread)
+        
+        self.analysis_thread.started.connect(self.analysis_worker.run)
+        self.analysis_worker.finished.connect(lambda r, p, f: self.on_analysis_finished(comp, r, p, f))
+        
+        # Proper cleanup sequence
+        self.analysis_worker.finished.connect(self.analysis_thread.quit)
+        self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
+        self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
+        self.analysis_thread.finished.connect(self.clear_thread_refs)
+        
+        self.analysis_thread.start()
+
+    def clear_thread_refs(self):
+        """Nullify references to allow GC and avoid RuntimeError."""
+        self.analysis_thread = None
+        self.analysis_worker = None
+
+    def on_analysis_finished(self, comp, report, preview, full_res):
+        print(report)
+        self.update_detector_view(comp, preview, full_res)
 
 class ZoomableView(QGraphicsView):
     def __init__(self, scene):
