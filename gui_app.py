@@ -607,7 +607,7 @@ class PropertyPanel(QWidget):
         h, w = noise_arr.shape
         
         # 1. Get wavelength color (using pre-existing unified function)
-        src = next((c for c in self.app.system.components if isinstance(c, (PointSource, BeamSource))), None)
+        src = next((c for c in self.app.system.components if isinstance(c, PointSource)), None)
         wvl = src.params.get('wavelength', 532.0) if src else 532.0
         color = wavelength_to_color(wvl)
         r_m, g_m, b_m = color.red(), color.green(), color.blue()
@@ -787,24 +787,14 @@ class SimulatorApp(QMainWindow):
         add_action("Grating", "🏁", lambda: self.add_comp(Grating(50, 0, 0)))
         add_action("Target", "🅰", lambda: self.add_comp(TestTarget(0, 0, 0)))
         add_action("Aperture", "⭕", lambda: self.add_comp(Aperture(50, 0, 0)))
-        add_action("High-Pass", "HP", lambda: self.add_comp(HighPassFilter(50, 0, 0)))
-        add_action("Fan Src", "S", lambda: self.add_comp(PointSource(-80, 0, 0)))
-        add_action("Detector", "D", lambda: self.add_comp(Detector(120, 0, 0)))
-        
-        toolbar.addSeparator()
-        self.snap_act = QAction("Snapping ON", self)
-        self.snap_act.setCheckable(True)
-        self.snap_act.setChecked(True)
-        self.snap_act.toggled.connect(self.toggle_snap)
-        toolbar.addAction(self.snap_act)
+        add_action("High-Pass", "🔴", lambda: self.add_comp(HighPassFilter(50, 0, 0)))
+        add_action("Fan Src", "☀️", lambda: self.add_comp(PointSource(-80, 0, 0)))
+        add_action("Detector", "📹", lambda: self.add_comp(Detector(120, 0, 0)))
         
         toolbar.addSeparator()
         add_action("Save", "💾", self.save_scene)
         add_action("Load", "📂", self.load_scene)
 
-    def toggle_snap(self, enabled):
-        self.snapping_enabled = enabled
-        self.snap_act.setText("Snapping ON" if enabled else "Snapping OFF")
 
     def on_selection_changed(self):
         self.props_panel.sync_data()

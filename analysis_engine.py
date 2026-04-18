@@ -139,7 +139,7 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 				F = lp.RectAperture(r_m*2, r_m*2, 0, 0, 0, F)
 			elif shape == 'Gaussian':
 				x = np.linspace(-curr_l/2, curr_l/2, N)
-				X, Y = np.meshgrid(x, x)
+				X, Y = np.meshgrid(x, x[::-1])
 				F.field = F.field * np.exp(-(X**2 + Y**2) / (2 * r_m**2))
 			else: # Default Circular
 				F = lp.CircAperture(r_m, 0, 0, F)
@@ -176,13 +176,15 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 			action_str = f"Detector {det_size_mm:.1f}mm"
 
 		elif isinstance(comp, Mirror):
-			# Mirror: in wave optics on-axis, it's just a reflection (no phase change for flat)
-			action_str = f"Mirror (pass-through)"
+			# Mirror reflects the coordinate system (Horizontal flip in our 2D-plane analysis)
+			F.field = np.flip(F.field, axis=1)
+			action_str = "Mirror Reflection (Field Flip)"
 
 		elif isinstance(comp, TestTarget):
 			s_m = comp.params.get('size', 5.0) * MM
 			x = np.linspace(-curr_l / 2, curr_l / 2, N)
-			X, Y = np.meshgrid(x, x)
+			# Align grid with image coordinates (Row 0 at Top)
+			X, Y = np.meshgrid(x, x[::-1])
 			# Letter 'F' Mask logic from optical_cli.py
 			mask = np.zeros_like(X, dtype=bool)
 			# Vertical stem
