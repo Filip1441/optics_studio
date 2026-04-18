@@ -2,7 +2,7 @@ import numpy as np
 import logging
 
 # Local imports (Moving to top to avoid isinstance issues with dynamic loading)
-from components import PointSource, BeamSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter, CrossGrating
+from components import PointSource, BeamSource, Lens, Mirror, Detector, Aperture, Grating, HighPassFilter
 
 # Configure logging
 logging.basicConfig(
@@ -45,7 +45,6 @@ class OpticalSystem:
 	def __init__(self):
 		self.components = []
 		self.rays = [] # Rays for GUI display
-		self.analysis_rays = [] # High-density rays for detectors
 		self.table_bounds = 10.0 # 10x10 meter table
 
 	def update(self):
@@ -54,7 +53,6 @@ class OpticalSystem:
 	def update_rays(self):
 		from collections import deque
 		self.rays = []
-		self.analysis_rays = []
 		all_trace_queue = deque() # Queue for BFS
 		
 		# Clear Detector hits
@@ -83,51 +81,14 @@ class OpticalSystem:
 					ray = Ray(origin, [nx, ny, 0.0], wavelength=wl)
 					self.rays.append(ray)
 					
-		# --- LAYER 2: ANALYSIS RAYS (HIGH DENSITY) ---
-		# Fixed seed for flicker-free detector view
-		rng = np.random.default_rng(42) 
-		n_anal = 500 
-		
-		for src in [c for c in self.components if isinstance(c, (PointSource, BeamSource))]:
-			wl = src.params.get("wavelength", 532.0)
-			rad_base = np.radians(src.angle)
 			
-			for _ in range(n_anal):
-				if isinstance(src, PointSource):
-					# Point source: Uniform cone of rays in 3D
-					div_ang = src.params.get("angle_range", 0.4)
-					# Correct 3D sampling: Uniform solid angle
-					# cos(theta) sampled uniformly from [cos(alpha), 1]
-					cos_limit = np.cos(div_ang / 2.0)
-					cos_theta = rng.uniform(cos_limit, 1.0)
-					sin_theta = np.sqrt(1.0 - cos_theta**2)
-					phi = rng.uniform(0, 2*np.pi)
-					
-					dx, dy, dz = cos_theta, sin_theta * np.cos(phi), sin_theta * np.sin(phi)
-					vx = dx * np.cos(rad_base) - dy * np.sin(rad_base)
-					vy = dx * np.sin(rad_base) + dy * np.cos(rad_base)
-					ray = Ray([src.x, src.y, 0.0], [vx, vy, dz], wavelength=wl)
-				else: # BeamSource
-					width = src.params.get("width", 0.1)
-					r_s = np.sqrt(rng.random()) * (width / 2.0)
-					phi_s = rng.uniform(0, 2*np.pi)
-					u, v = r_s * np.cos(phi_s), r_s * np.sin(phi_s)
-					nx, ny = np.cos(rad_base), np.sin(rad_base)
-					tx, ty = -ny, nx
-					origin = np.array([src.x, src.y, 0.0]) + np.array([tx*u, ty*u, v])
-					ray = Ray(origin, [nx, ny, 0.0], wavelength=wl)
-				
-				ray._is_analysis = True # Mark for detector-only tracking
-				self.analysis_rays.append(ray)
 
 		# Process all rays
-		for r in self.rays + self.analysis_rays:
+		for r in self.rays:
 			all_trace_queue.append(r)
 			
-		# To support 'Automatic' beam footprint on gratings, 
-		# we clear temporary hit storage
 		for comp in self.components:
-			if isinstance(comp, (Grating, CrossGrating)):
+			if isinstance(comp, Grating):
 				comp._gui_hits = []
 
 		# Main Tracing Loop
@@ -138,16 +99,15 @@ class OpticalSystem:
 		# --- SECOND PASS: Automatic Grating Beam Regeneration ---
 		# For gratings that were hit by GUI rays, we now spawn the dense fans
 		grating_spawn_queue = deque()
-		for comp in [c for c in self.components if isinstance(c, (Grating, CrossGrating))]:
+		for comp in [c for c in self.components if isinstance(c, Grating)]:
 			if hasattr(comp, '_gui_hits') and comp._gui_hits:
-				# Calculate footprint in LOCAL coordinates along the grating surface (v_y axis)
+				# Calculate footprint in LOCAL coordinates
 				p_center = np.array([comp.x, comp.y, 0.0])
 				angle_rad = np.radians(comp.angle)
 				n = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
 				v_y = np.array([-n[1], n[0], 0.0]) 
 				v_z = np.array([0.0, 0.0, 1.0])
 				
-				# Get local transverse coordinates and directions of all hits
 				hits_data = []
 				for h in comp._gui_hits:
 					loc_y = np.dot(h['pt'] - p_center, v_y)
@@ -157,55 +117,63 @@ class OpticalSystem:
 				
 				hits_data.sort(key=lambda x: x['y'])
 				
-				min_loc = hits_data[0]['y']
-				max_loc = hits_data[-1]['y']
+				# Simplified logic: The output beam center should coincide with the input beam center
+				y_center = np.mean([h['y'] for h in hits_data])
+				width = max(0.01, hits_data[-1]['y'] - hits_data[0]['y'])
 				
 				n_orders = comp.params.get("n_orders", 2)
 				rpo = comp.params.get("rays_per_order", 9)
+				pattern = comp.params.get("pattern", "Linear")
+				
 				orders_y = range(-n_orders, n_orders + 1)
-				is_cross = isinstance(comp, CrossGrating)
-				orders_z = orders_y if is_cross else range(1)
+				orders_z = orders_y if pattern in ["Crossed", "Chessboard"] else range(1)
 				
 				lines_mm = comp.params.get("line_density", 300)
 				d = (1e-3) / lines_mm 
 				
-				# Generate dense beam for each order with interpolated incident physics
+				# For 'Simplified' look, we use the average incident ray as a template for ALL rays
+				# This makes all rays in the diffracted fans appear to branch from the center of the hit
+				idx_mid = len(hits_data) // 2
+				template_hit = hits_data[idx_mid]
+				
 				for my in orders_y:
 					for mz in orders_z:
-						for offset in np.linspace(min_loc, max_loc, rpo):
-							# 1. Linear interpolation of incident properties at this offset
+						# For Chessboard, we might want to block half the orders, 
+						# but usually it's just a 2D grating.
+						if pattern == "Chessboard" and (my + mz) % 2 != 0:
+							continue
+							
+						for i, offset in enumerate(np.linspace(y_center - width/2, y_center + width/2, rpo)):
+							# Interpolate physics if possible, otherwise use template
 							if len(hits_data) > 1:
-								# Simple linear interpolation based on local Y
 								y_vals = [hd['y'] for hd in hits_data]
 								interp_sy = np.interp(offset, y_vals, [hd['sy'] for hd in hits_data])
 								interp_sz = np.interp(offset, y_vals, [hd['sz'] for hd in hits_data])
 								interp_z = np.interp(offset, y_vals, [hd['z'] for hd in hits_data])
-								wl = hits_data[0]['wl'] # Assume monochromatic beam for GUI simplicity
-								pts_template = hits_data[0]['points']
 							else:
-								interp_sy, interp_sz, interp_z = hits_data[0]['sy'], hits_data[0]['sz'], hits_data[0]['z']
-								wl, pts_template = hits_data[0]['wl'], hits_data[0]['points']
-
-							wl_m = wl * 1e-9
+								interp_sy, interp_sz, interp_z = template_hit['sy'], template_hit['sz'], template_hit['z']
 							
-							# 2. Physics: Individual Grating Equation for this local incident angle
+							wl_m = template_hit['wl'] * 1e-9
 							sy, sz = interp_sy + my*(wl_m/d), interp_sz + mz*(wl_m/d)
+							
 							if (sy**2 + sz**2) <= 1.0:
 								sc = np.sqrt(1.0 - sy**2 - sz**2)
-								# Ensure propagation direction matches incident hemisphere relative to normal
-								# Using a generic forward assumption for simple transmission grating
-								# To be robust, we compare dot(dir_in, n)
-								if hits_data[0]['sy']**2 + hits_data[0]['sz']**2 <= 1.0: # dummy check
-									dir_in_template = hits_data[0]['sy']*v_y + hits_data[0]['sz']*v_z + np.sqrt(max(0, 1-hits_data[0]['sy']**2-hits_data[0]['sz']**2))*n
-									# However, just using n direction is safer for standard setup
-									if np.dot(dir_in_template, n) < 0: sc = -sc
+								if np.dot(template_hit['sy']*v_y + template_hit['sz']*v_z + n, n) < 0: sc = -sc
 								
 								new_dir = sy*v_y + sz*v_z + sc*n
 								new_dir /= np.linalg.norm(new_dir)
 								
 								origin = p_center + offset * v_y + interp_z * v_z + 1e-4 * n
-								child = Ray(origin, new_dir, wl)
-								child.points = list(pts_template)
+								child = Ray(origin, new_dir, template_hit['wl'])
+								# IMPROVED: Map each ray in the diffracted fan to the hit closest to its offset.
+								# This ensures the output beams maintain the correct width and alignment with input rays.
+								y_vals = [hd['y'] for hd in hits_data]
+								closest_idx = np.abs(np.array(y_vals) - offset).argmin()
+								parent_hit = hits_data[closest_idx]
+								
+								# START FIX: To avoid 'thick' rays (over-drawing the incident path), 
+								# we start the child history exactly where the parent hit.
+								child.points = [origin[:2]]
 								child._is_generated = True
 								self.rays.append(child)
 								grating_spawn_queue.append(child)
@@ -277,37 +245,9 @@ class OpticalSystem:
 					v_axial = np.dot(ray.direction, np.array([nx, ny, 0.0]))
 					ray.direction -= (v_axial * h_u / f) * v_tangent + (v_axial * h_z / f) * w_z
 					ray.direction /= np.linalg.norm(ray.direction)
-				elif isinstance(hitted_comp, (Grating, CrossGrating)):
-					is_anal = getattr(ray, '_is_analysis', False)
+				elif isinstance(hitted_comp, Grating):
 					is_generated = getattr(ray, '_is_generated', False)
-					
-					lines_mm = hitted_comp.params.get("line_density", 300)
-					d = (1e-3) / lines_mm 
-					wl_m = ray.wavelength * 1e-9
-					angle_rad = np.radians(hitted_comp.angle)
-					n = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
-					v_y = np.array([-n[1], n[0], 0.0]) 
-					v_z = np.array([0.0, 0.0, 1.0])
-					
-					n_orders = hitted_comp.params.get("n_orders", 2)
-					orders_y = range(-n_orders, n_orders + 1)
-					is_cross = isinstance(hitted_comp, CrossGrating)
-					orders_z = orders_y if is_cross else range(1)
-
-					if is_anal:
-						sin_iy, sin_iz = np.dot(ray.direction, v_y), np.dot(ray.direction, v_z)
-						for my in orders_y:
-							for mz in orders_z:
-								sy, sz = sin_iy + my*(wl_m/d), sin_iz + mz*(wl_m/d)
-								if (sy**2 + sz**2) <= 1.0:
-									sc = np.sqrt(1.0 - sy**2 - sz**2)
-									if np.dot(ray.direction, n) < 0: sc = -sc
-									new_dir = sy*v_y + sz*v_z + sc*n
-									child = Ray(closest_hit, new_dir/np.linalg.norm(new_dir), ray.wavelength)
-									child._is_analysis = True
-									child.points = list(ray.points)
-									if queue is not None: queue.append(child)
-					elif not is_generated:
+					if not is_generated:
 						if not hasattr(hitted_comp, '_gui_hits'): hitted_comp._gui_hits = []
 						hitted_comp._gui_hits.append({'pt': closest_hit, 'ray': ray})
 					
@@ -327,25 +267,8 @@ class OpticalSystem:
 						ray.alive = False
 						break
 				elif isinstance(hitted_comp, Detector):
-					# Only analysis rays contribute to the sensor image
-					if getattr(ray, '_is_analysis', False):
-						angle_rad = np.radians(hitted_comp.angle)
-						nx, ny = np.cos(angle_rad), np.sin(angle_rad)
-						vx, vy = -ny, nx
-						v_trans = np.array([vx, vy]) 
-						
-						u = np.dot(closest_hit[:2] - np.array([hitted_comp.x, hitted_comp.y]), v_trans)
-						v_z = closest_hit[2]
-						
-						if not hasattr(hitted_comp, 'hits'): hitted_comp.hits = []
-						hitted_comp.hits.append({
-							'u': u,
-							'v': v_z,
-							'wavelength': ray.wavelength,
-							'intensity': 1.0
-						})
-					ray.origin = closest_hit
-					continue
+					ray.alive = False
+					break
 			else:
 				end_pt = ray.origin + ray.direction * 10.0
 				ray.points.append(end_pt[:2])
@@ -356,13 +279,125 @@ class OpticalSystem:
 	def get_axis_path(self):
 		"""Calculates the main optical axis path (starts from the first source)."""
 		src = next((c for c in self.components if isinstance(c, (PointSource, BeamSource))), None)
-		
-		# Axis starts from source position and follows its main emission direction
 		if src:
 			nx, ny = np.cos(np.radians(src.angle)), np.sin(np.radians(src.angle))
 			axis_ray = Ray([src.x, src.y, 0.0], [nx, ny, 0.0])
 		else:
 			axis_ray = Ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])
-			
 		self.trace_ray(axis_ray)
 		return axis_ray.points
+
+	def analyze_system(self):
+		"""Returns a structured text report of components along the optical axis."""
+		src = next((c for c in self.components if isinstance(c, (PointSource, BeamSource))), None)
+		if not src: return "ANALYSIS ERROR: No Light Source found in the system."
+		
+		nx, ny = np.cos(np.radians(src.angle)), np.sin(np.radians(src.angle))
+		axis_ray = Ray([src.x, src.y, 0.0], [nx, ny, 0.0])
+		
+		# Incident beam width
+		beam_width = src.params.get("width", 0.01) if isinstance(src, BeamSource) else 0.0
+		curr_pos = np.array([src.x, src.y, 0.0])
+		curr_dir = np.array([nx, ny, 0.0])
+		
+		lines = []
+		lines.append("="*60)
+		lines.append("        OPTICAL SYSTEM ANALYSIS (AXIAL REPORT)")
+		lines.append("="*60)
+		lines.append(f"START: {src.name}")
+		lines.append(f"  - Initial Beam Diameter: {beam_width*1000:.2f} mm")
+		lines.append(f"  - Wavelength: {src.params.get('wavelength', 532.0)} nm")
+		lines.append("-" * 40)
+
+		processed = [src]
+		for _ in range(15):
+			closest_hit = None
+			closest_t = float('inf')
+			hitted_comp = None
+			
+			for comp in self.components:
+				if comp in processed: continue
+				angle_rad = np.radians(comp.angle)
+				normal = np.array([np.cos(angle_rad), np.sin(angle_rad)])
+				res = axis_ray.propagate_to_plane(np.array([comp.x, comp.y]), normal)
+				if res:
+					hit_pt, t = res
+					if t < closest_t and t > 1e-5:
+						closest_t = t
+						closest_hit = hit_pt
+						hitted_comp = comp
+			
+			if not hitted_comp: break
+			
+			dist = np.linalg.norm(closest_hit - curr_pos)
+			# Geometric expansion for point source in first segment
+			if isinstance(src, PointSource) and len(processed) == 1:
+				beam_width = 2 * dist * np.tan(src.params.get("angle_range", 0.1)/2)
+			
+			width_in = beam_width
+			r_comp = hitted_comp.params.get("r", 0.05)
+			
+			is_hp = hitted_comp.__class__.__name__ == "HighPassFilter"
+			if is_hp:
+				width_out = width_in # Diameter stays same
+				clipping_info = f"Blocks central rays within R={r_comp*1000:.1f}mm"
+			else:
+				width_out = min(width_in, 2*r_comp)
+				clipping_info = f"Clipped by R={r_comp*1000:.1f}mm"
+			
+			lines.append(f"NEXT: {hitted_comp.name}")
+			lines.append(f"  - Distance from prev: {dist*1000:.1f} mm")
+			lines.append(f"  - Incident Diameter: {width_in*1000:.2f} mm")
+			lines.append(f"  - Output Diameter:   {width_out*1000:.2f} mm ({clipping_info})")
+			
+			# Physics specifics (Clarified Units)
+			for p_key, p_val in hitted_comp.params.items():
+				if p_key not in ['r', 'wavelength', 'n_rays', 'angle_range', 'width', 'pattern']:
+					unit = ""
+					if p_key == 'f': unit = " m"
+					if p_key == 'line_density': unit = " lines/mm"
+					lines.append(f"  - Parameter '{p_key}': {p_val}{unit}")
+			
+			# Special Grating multi-beam analysis
+			if isinstance(hitted_comp, Grating):
+				lines_mm = hitted_comp.params.get("line_density", 300)
+				d = 1e-3 / lines_mm
+				wl_m = src.params.get('wavelength', 532.0) * 1e-9
+				
+				# Incident angle relative to normal
+				n_vec = np.array([np.cos(np.radians(hitted_comp.angle)), np.sin(np.radians(hitted_comp.angle)), 0.0])
+				cos_i = np.dot(curr_dir, n_vec)
+				# sin_i is the transverse component
+				v_y = np.array([-n_vec[1], n_vec[0], 0.0]) 
+				sin_i = np.dot(curr_dir, v_y)
+				
+				n_orders = hitted_comp.params.get("n_orders", 2)
+				lines.append(f"  - Multi-beam branching (Order Angles):")
+				for m in range(-n_orders, n_orders + 1):
+					sin_m = sin_i + m * (wl_m / d)
+					if abs(sin_m) <= 1.0:
+						theta_m = np.degrees(np.arcsin(sin_m))
+						lines.append(f"    * m={m:2d}: Angle = {theta_m:6.2f}°")
+					else:
+						lines.append(f"    * m={m:2d}: EVANESCENT (Blocked)")
+
+			lines.append("-" * 40)
+			
+			# Update
+			curr_pos = closest_hit
+			beam_width = width_out
+			processed.append(hitted_comp)
+			axis_ray.origin = closest_hit
+			
+			# Change direction if mirror
+			if isinstance(hitted_comp, Mirror):
+				angle_rad = np.radians(hitted_comp.angle)
+				n_3d = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
+				curr_dir = curr_dir - 2 * np.dot(curr_dir, n_3d) * n_3d
+				axis_ray.direction = curr_dir
+			elif isinstance(hitted_comp, Detector):
+				break
+				
+		lines.append("ANALYSIS COMPLETE.")
+		lines.append("="*60)
+		return "\n".join(lines)

@@ -36,8 +36,7 @@ class OpticalComponent:
 		
 		# Specialized logic for certain components
 		if isinstance(obj, Lens):
-			f = obj.params.get("f", 0.5)
-			obj.name = f"Lens (f={f})"
+			obj.name = "Lens"
 		return obj
 
 class PointSource(OpticalComponent):
@@ -49,7 +48,7 @@ class PointSource(OpticalComponent):
 class Lens(OpticalComponent):
 	def __init__(self, x=0, y=0, angle=0, f=0.5, r=0.2):
 		# Default to larger scale (f=50cm, r=20cm) as user wants 10m table
-		super().__init__(x, y, angle, f"Lens (f={f})")
+		super().__init__(x, y, angle, "Lens")
 		self.params = {"f": f, "r": r}
 
 class Mirror(OpticalComponent):
@@ -68,7 +67,8 @@ class Grating(OpticalComponent):
 			"line_density": line_density, 
 			"n_orders": 2, 
 			"rays_per_order": 9,
-			"beam_width_preview": 0.1
+			"beam_width_preview": 0.1,
+			"pattern": "Linear" # Linear, Crossed, Chessboard
 		}
 
 class Detector(OpticalComponent):
@@ -100,14 +100,3 @@ class HighPassFilter(OpticalComponent):
 		super().__init__(x, y, angle, "HighPassFilter")
 		self.params = {"r": r}
 
-class CrossGrating(OpticalComponent):
-	"""2D diffraction grating (grid)."""
-	def __init__(self, x=0, y=0, angle=0, r=0.2, line_density=300):
-		super().__init__(x, y, angle, "CrossGrating")
-		self.params = {
-			"r": r,
-			"line_density": line_density, 
-			"n_orders": 2, 
-			"rays_per_order": 5,
-			"beam_width_preview": 0.1
-		}

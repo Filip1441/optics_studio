@@ -17,7 +17,6 @@ class SceneManager:
 			"BeamSource": BeamSource,
 			"Aperture": Aperture,
 			"Grating": Grating,
-			"CrossGrating": CrossGrating,
 			"HighPassFilter": HighPassFilter,
 			"ArrowObject": ArrowObject
 		}

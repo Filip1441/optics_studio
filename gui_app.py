@@ -239,27 +239,36 @@ class VisualComponent(QGraphicsItem):
             painter.drawLine(-3, -gap_i, 3, -gap_i)
             painter.drawLine(-3, gap_i, 3, gap_i)
         elif isinstance(self.component, Grating):
-            # Grating: Line with tick marks
+            # Grating: Symbol depends on pattern
             painter.setPen(QPen(QColor(200, 200, 50), 2))
             ri = int(round(r))
-            painter.drawLine(0, -ri, 0, ri)
-            for i in np.arange(-ri, ri+1, 5):
-                ii = int(i)
-                painter.drawLine(0, ii, 4, ii)
+            pattern = self.component.params.get("pattern", "Linear")
+            
+            if pattern == "Linear":
+                painter.drawLine(0, -ri, 0, ri)
+                for i in np.arange(-ri, ri+1, 5):
+                    ii = int(i)
+                    painter.drawLine(0, ii, 4, ii)
+            elif pattern in ["Crossed", "Chessboard"]:
+                # Grid or Chessboard symbol
+                for i in np.arange(-ri, ri+1, 10):
+                    ii = int(i)
+                    painter.drawLine(-ri, ii, ri, ii) 
+                    painter.drawLine(ii, -ri, ii, ri)
+                if pattern == "Chessboard":
+                    painter.setPen(QPen(QColor(200, 200, 50, 100), 1))
+                    painter.setBrush(QBrush(QColor(200, 200, 50, 50)))
+                    for i in np.arange(-ri, ri, 10):
+                        for j in np.arange(-ri, ri, 10):
+                            if (i // 10 + j // 10) % 2 == 0:
+                                painter.drawRect(i, j, 10, 10)
         elif isinstance(self.component, HighPassFilter):
-            # High-Pass Filter: A central blocking disk
+            # High-Pass Filter: A central blocking disk (DC Block)
             painter.setPen(QPen(QColor(255, 100, 100), 2))
-            painter.setBrush(QBrush(QColor(255, 50, 50, 100)))
-            ri = int(round(r * 2.0)) # Visual amplification
+            painter.setBrush(QBrush(QColor(255, 50, 50, 150)))
+            # Draw as a solid circle in the center
+            ri = int(round(r)) 
             painter.drawEllipse(-ri, -ri, 2*ri, 2*ri)
-        elif isinstance(self.component, CrossGrating):
-            # Grid symbol
-            painter.setPen(QPen(QColor(200, 200, 50), 2))
-            ri = int(round(r))
-            for i in np.arange(-ri, ri+1, 5):
-                ii = int(i)
-                painter.drawLine(-ri, ii, ri, ii) 
-                painter.drawLine(ii, -ri, ii, ri)
         elif isinstance(self.component, Detector):
             # Scientific Camera Shape: Body + Sensor housing
             painter.setPen(QPen(QColor(100, 116, 139), 2)) # Blue-gray metallic
@@ -443,7 +452,7 @@ class PropertyPanel(QWidget):
             self.specific_form.addRow("Wavelength", wl_spin)
 
         # 3. Diameter / Radius control (Only for valid targets)
-        if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter, CrossGrating)):
+        if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter)):
             r_spin = QDoubleSpinBox()
             r_spin.setRange(0.001, 2.0)
             r_spin.setSuffix(" m")
@@ -453,7 +462,12 @@ class PropertyPanel(QWidget):
             r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
 
         # 4. Grating Density & Preview Logic
-        if isinstance(comp, (Grating, CrossGrating)):
+        if isinstance(comp, Grating):
+            p_combo = self.app.add_combo_to_form(self.specific_form, "Pattern", 
+                                                 ["Linear", "Crossed", "Chessboard"], 
+                                                 comp.params.get('pattern', 'Linear'),
+                                                 lambda v: self.apply_param('pattern', v))
+
             d_spin = QDoubleSpinBox()
             d_spin.setRange(1.0, 5000.0)
             d_spin.setSuffix(" lines/mm")
@@ -487,9 +501,12 @@ class PropertyPanel(QWidget):
         del_btn.clicked.connect(self.app.delete_selected)
         self.specific_form.addRow(del_btn)
         
-        # Update Sensor View if detector
+        # Update Sensor View if detector (Now dummy)
         if isinstance(comp, Detector):
             self.update_detector_view(comp)
+            # TRIGGER ANALYSIS PRINT TO TERMINAL
+            report = self.app.system.analyze_system()
+            print(report)
         else:
             self.sensor_label.hide()
             
@@ -499,109 +516,15 @@ class PropertyPanel(QWidget):
         if not self.sensor_label: return
         self.sensor_label.show()
         
-        # Create a buffer canvas
+        # Purely black sensor area as per request
         W, H = 240, 160
         canvas = QPixmap(W, H)
         canvas.fill(QColor(0, 0, 0))
-        
         painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        try:
-            # 1. Adapt Wave Window to Detector physical size (Radius)
-            det_radius = comp.params.get('r', 0.015)
-            self.app.wave_engine.size = det_radius * 2.5 # Give a bit of margin
-            
-            # Find the first source to define parameters
-            src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
-            if src:
-                self.app.wave_engine.wavelength = src.params.get('wavelength', 532.0) * 1e-9
-            
-            # Refresh coordinates
-            self.app.wave_engine.__init__(res=512, size=self.app.wave_engine.size)
-            self.app.wave_engine.wavelength = (src.params.get('wavelength', 532.0) * 1e-9) if src else 532e-9
-            
-            axis_path = self.app.system.get_axis_path()
-            field = self.app.wave_engine.calculate_on_axis(self.app.system.components, axis_path)
-            
-            if field is not None:
-                if comp.params.get('spectral_view', False):
-                    # Show Fourier Plane (Spectrum)
-                    field = fftshift(fft2(field))
-                
-                # 2. Convert Field to Intensity
-                intensity = np.abs(field)**2
-                imax = np.max(intensity)
-                if imax > 0:
-                    intensity = (intensity / imax)**(1.0/1.5) # Gamma for better glow
-                
-                # 3. Apply Color based on wavelength
-                wl_nm = self.app.wave_engine.wavelength * 1e9
-                q_color = wavelength_to_color(wl_nm)
-                
-                h, w = intensity.shape
-                display_data = (intensity * 255).astype(np.uint8)
-                
-                # Colorize from grayscale
-                color_image = QImage(w, h, QImage.Format.Format_RGB32)
-                for y in range(h):
-                    for x in range(w):
-                        v = int(display_data[y, x])
-                        # Tint with beam color
-                        pixel_color = QColor(
-                            int(q_color.red() * v / 255),
-                            int(q_color.green() * v / 255),
-                            int(q_color.blue() * v / 255)
-                        )
-                        color_image.setPixelColor(x, y, pixel_color)
-                        
-                # 4. Calculate Transverse Offset (Y) relative to Source
-                # Find the first source to define the axis
-                src = next((c for c in self.app.system.components if "Source" in c.__class__.__name__), None)
-                y_offset = (comp.y - src.y) if src else 0
-                
-                px_offset = (y_offset / self.app.wave_engine.size) * 160.0
-                target_rect = QRectF(40, -px_offset, 160, 160)
-                
-                painter.setOpacity(1.0)
-                painter.drawImage(target_rect, color_image)
-                
-                # 6. Scientific Overlay / Rulers
-                painter.setOpacity(1.0)
-                painter.setPen(QColor(150, 150, 150))
-                painter.setFont(QFont("Consolas", 6))
-                
-                win_size_mm = self.app.wave_engine.size * 1000
-                half_win = win_size_mm / 2.0
-                
-                # Bottom Ruler (X-Axis of sensor)
-                painter.drawLine(40, H-15, 200, H-15)
-                for i in range(5):
-                    x = 40 + i * 40
-                    val = -half_win + (i/4.0) * win_size_mm
-                    painter.drawLine(x, H-15, x, H-20)
-                    painter.drawText(x-10, H-5, f"{val:.1f}")
-                
-                # Side Ruler (Y-Axis of sensor)
-                painter.drawLine(35, 0, 35, 160)
-                for i in range(5):
-                    y = 160 - i * 40
-                    val = -half_win + (i/4.0) * win_size_mm
-                    painter.drawLine(35, y, 40, y)
-                    painter.drawText(5, y+3, f"{val:.1f}")
-
-                painter.setPen(QColor(100, 255, 100, 150))
-                painter.drawText(205, 15, "mm-Metrology")
-            else:
-                painter.setPen(QColor(100, 100, 100))
-                painter.drawText(50, 80, "No Active Wavefront")
-                
-        except Exception as e:
-            logger.error(f"Wave Engine Error: {e}")
-            painter.setPen(QColor(255, 100, 100))
-            painter.drawText(10, 80, f"Error: {str(e)[:30]}")
-            
+        painter.setPen(QColor(50, 50, 50))
+        painter.drawText(10, 80, "Dummy Sensor - Check Terminal")
         painter.end()
+        self.sensor_label.setPixmap(canvas)
         self.sensor_label.setPixmap(canvas)
 
     def apply_changes(self):
@@ -620,9 +543,14 @@ class PropertyPanel(QWidget):
     def apply_param(self, key, val):
         items = self.app.scene.selectedItems()
         if not items: return
-        items[0].component.params[key] = val
-        logger.info(f"UI: Property '{key}' updated for {items[0].component.uid} to {val}")
+        comp = items[0].component
+        comp.params[key] = val
+        logger.info(f"UI: Property '{key}' updated for {comp.uid} to {val}")
         self.app.update_rays()
+        
+        # Trigger analysis print if it's a detector being modified
+        if isinstance(comp, Detector):
+            print(self.app.system.analyze_system())
 
 class ZoomableView(QGraphicsView):
     def __init__(self, scene):
@@ -722,7 +650,6 @@ class SimulatorApp(QMainWindow):
         add_action("Lens", "L", lambda: self.add_comp(Lens(0, 0, 0)))
         add_action("Mirror", "M", lambda: self.add_comp(Mirror(0.5, 0, 45)))
         add_action("Grating", "G", lambda: self.add_comp(Grating(0.5, 0, 0)))
-        add_action("Cross Grating", "XG", lambda: self.add_comp(CrossGrating(0.5, 0, 0)))
         add_action("High-Pass", "HP", lambda: self.add_comp(HighPassFilter(0.5, 0, 0)))
         add_action("Fan Src", "S", lambda: self.add_comp(PointSource(-0.8, 0, 0)))
         add_action("Beam Src", "B", lambda: self.add_comp(BeamSource(-0.8, -0.2, 0)))
@@ -831,6 +758,15 @@ class SimulatorApp(QMainWindow):
             for comp in self.system.components:
                 self.scene.addItem(VisualComponent(comp, self))
             self.update_rays()
+
+    def add_combo_to_form(self, form, label, items, current_val, callback):
+        from PyQt6.QtWidgets import QComboBox
+        combo = QComboBox()
+        combo.addItems(items)
+        combo.setCurrentText(current_val)
+        combo.currentTextChanged.connect(callback)
+        form.addRow(label, combo)
+        return combo
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:

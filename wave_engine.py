@@ -80,10 +80,15 @@ class WaveEngine:
         phase = np.exp(-1j * k / (2 * f) * r_sq)
         return field * mask * phase
 
-    def apply_grating(self, field, lines_mm, is_cross=False):
+    def apply_grating(self, field, lines_mm, pattern="Linear"):
         d = 1e-3 / lines_mm
-        trans = 0.5 * (1 + np.cos(2 * np.pi * self.X / d))
-        if is_cross: trans *= 0.5 * (1 + np.cos(2 * np.pi * self.Y / d))
+        if pattern == "Chessboard":
+            # Approximated chessboard mask
+            trans = 0.5 * (1 + np.cos(2 * np.pi * self.X / d) * np.cos(2 * np.pi * self.Y / d))
+        else:
+            trans = 0.5 * (1 + np.cos(2 * np.pi * self.X / d))
+            if pattern == "Crossed": 
+                trans *= 0.5 * (1 + np.cos(2 * np.pi * self.Y / d))
         return field * trans
 
     def apply_aperture(self, field, r):
@@ -147,9 +152,7 @@ class WaveEngine:
             if c_name == "Lens": 
                 field = self.apply_lens(field, p.get('f', 0.5), p.get('r', 0.1))
             elif c_name == "Grating": 
-                field = self.apply_grating(field, p.get('line_density', 300))
-            elif c_name == "CrossGrating": 
-                field = self.apply_grating(field, p.get('line_density', 300), is_cross=True)
+                field = self.apply_grating(field, p.get('line_density', 300), pattern=p.get('pattern', 'Linear'))
             elif c_name == "Aperture": 
                 field = self.apply_aperture(field, p.get('r', 0.05))
             elif c_name == "HighPassFilter": 
