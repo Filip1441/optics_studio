@@ -496,15 +496,24 @@ class PropertyPanel(QWidget):
             wl_spin.valueChanged.connect(lambda v: self.apply_param('wavelength', v))
             self.specific_form.addRow("Wavelength", wl_spin)
 
-        # 3. Diameter / Radius control (Only for valid targets)
+        # 3. Diameter / Radius / Size control
         if isinstance(comp, (Lens, Mirror, Detector, Aperture, Grating, HighPassFilter)):
             r_spin = QDoubleSpinBox()
-            r_spin.setRange(0.001, 2.0)
+            r_spin.setRange(0.001, 5.0)
             r_spin.setSuffix(" m")
-            label = "Opening (R)" if isinstance(comp, Aperture) else "Radius (R)"
+            
+            # Context-sensitive labeling and value conversion
+            if isinstance(comp, Detector):
+                label = "Sensor Width (Side)"
+                r_spin.setValue(comp.params.get('r', 0.05) * 2) # Show full side
+                r_spin.valueChanged.connect(lambda v: self.apply_param('r', v / 2))
+            else:
+                if isinstance(comp, Aperture): label = "Opening (R)"
+                else: label = "Component Radius (R)"
+                r_spin.setValue(comp.params.get('r', 0.1))
+                r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
+            
             self.specific_form.addRow(label, r_spin)
-            r_spin.setValue(comp.params.get('r', 0.2))
-            r_spin.valueChanged.connect(lambda v: self.apply_param('r', v))
 
         # 4. Grating Density & Preview Logic
         if isinstance(comp, Grating):
@@ -645,16 +654,16 @@ class PropertyPanel(QWidget):
 
     def trigger_delayed_analysis(self):
         """Heavy analysis task triggered after interaction settles."""
-        # Cleanup any finished threads first to avoid dangling pointers
+        # 1. Physical safety check: is the previous calculation still busy?
         if self.analysis_thread is not None:
             try:
-                # Check if C++ object still exists and is running
                 if self.analysis_thread.isRunning():
+                    # Still calculating the previous frame. 
+                    # We defer this update to keep the UI responsive.
+                    self.analysis_timer.start(300) 
                     return 
             except RuntimeError:
-                # Object was deleted by Qt, null the reference
                 self.analysis_thread = None
-                self.analysis_worker = None
 
         items = self.app.scene.selectedItems()
         if not items: return
@@ -666,6 +675,7 @@ class PropertyPanel(QWidget):
         wl_nm = src.params.get('wavelength', 532.0) if src else 532.0
         qc = wavelength_to_color(wl_nm)
 
+        # 2. Build new worker/thread for the new state
         self.analysis_thread = QThread()
         self.analysis_worker = AnalysisWorker(self.app.system, qc)
         self.analysis_worker.moveToThread(self.analysis_thread)
@@ -673,7 +683,7 @@ class PropertyPanel(QWidget):
         self.analysis_thread.started.connect(self.analysis_worker.run)
         self.analysis_worker.finished.connect(lambda r, p, f: self.on_analysis_finished(comp, r, p, f))
         
-        # Proper cleanup sequence
+        # Proper strictly-sequenced cleanup
         self.analysis_worker.finished.connect(self.analysis_thread.quit)
         self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
         self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
