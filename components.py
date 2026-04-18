@@ -82,7 +82,7 @@ class Aperture(OpticalComponent):
 	"""An opening that clips rays outside its radius."""
 	def __init__(self, x=0, y=0, angle=0, r=5.0):
 		super().__init__(x, y, angle, "Aperture")
-		self.params = {"r": r, "shape": "Circular"}
+		self.params = {"r": r, "shape": "Circular", "w": 10.0, "h": 10.0}
 
 class ArrowObject(OpticalComponent):
 	"""Placeholder for V3. Acts as a collection of point sources or decorative."""

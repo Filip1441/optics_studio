@@ -136,7 +136,9 @@ def calculate_analysis(system, detect_comp, cancel_check=None):
 			r_m = r_mm * MM
 			shape = comp.params.get('shape', 'Circular')
 			if shape == 'Square':
-				F = lp.RectAperture(r_m*2, r_m*2, 0, 0, 0, F)
+				w_m = comp.params.get('w', 10.0) * MM
+				h_m = comp.params.get('h', 10.0) * MM
+				F = lp.RectAperture(w_m, h_m, 0, 0, 0, F)
 			elif shape == 'Gaussian':
 				x = np.linspace(-curr_l/2, curr_l/2, N)
 				X, Y = np.meshgrid(x, x[::-1])

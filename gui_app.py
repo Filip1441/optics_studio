@@ -262,7 +262,7 @@ class VisualComponent(QGraphicsItem):
         elif isinstance(self.component, TestTarget):
             # Draw a visual letter 'F' in the scene
             painter.setPen(QPen(QColor(255, 255, 100), 2))
-            s = self.component.params.get('size', 5.0) * 2.5 # adjust for scene scale
+            s = int(self.component.params.get('size', 5.0) * 2.5) # adjust for scene scale
             painter.drawLine(-2, -s, -2, s) # Stem
             painter.drawLine(-2, -s, 3, -s) # Top
             painter.drawLine(-2, 0, 1, 0)   # Mid
@@ -272,9 +272,6 @@ class VisualComponent(QGraphicsItem):
             # Directional line
             painter.setPen(QPen(Qt.GlobalColor.white, 2))
             painter.drawLine(0, 0, 10, 0)
-        elif isinstance(self.component, (Lens, Grating, HighPassFilter, Aperture)):
-            # Draw shared logic if any, or skip to specific
-            pass
         elif isinstance(self.component, Aperture):
             # Aperture: Two blocks with a gap of 2*r
             painter.setPen(QPen(QColor(150, 150, 150), 4))
@@ -309,7 +306,7 @@ class VisualComponent(QGraphicsItem):
                         for j in np.arange(-ri, ri, 10):
                             if (i // 10 + j // 10) % 2 == 0:
                                 painter.drawRect(i, j, 10, 10)
-        elif self.component.__class__.__name__ == "HighPassFilter":
+        elif isinstance(self.component, HighPassFilter):
             # HighPassFilter: Central blocking dot on a thin line
             ri = int(round(r))
             # Support glass substrate line
@@ -391,7 +388,7 @@ class VisualComponent(QGraphicsItem):
                     new_pos.setY(pb[1])
                     
                     # Auto-orient perpendicular to axis segment
-                    if not isinstance(self.component, (Mirror, PointSource, BeamSource)):
+                    if not isinstance(self.component, (Mirror, PointSource)):
                         angle_rad = np.arctan2(v_norm[1], v_norm[0])
                         angle_deg = np.degrees(angle_rad)
                         self.update_angle(angle_deg)
@@ -518,12 +515,26 @@ class PropertyPanel(QWidget):
                 r_spin.setValue(comp.params.get('r', 12.5) if not isinstance(comp, TestTarget) else comp.params.get('size', 5.0))
                 r_spin.valueChanged.connect(lambda v: self.apply_param('r' if not isinstance(comp, TestTarget) else 'size', v))
 
-        # 3b. Aperture Shape
+        # 3b. Aperture Shape & Dimensions
         if isinstance(comp, Aperture):
             sh_combo = self.app.add_combo_to_form(self.specific_form, "Shape", 
                                                  ["Circular", "Square", "Gaussian"], 
                                                  comp.params.get('shape', 'Circular'),
                                                  lambda v: self.apply_param('shape', v))
+            if comp.params.get('shape') == "Square":
+                w_spin = QDoubleSpinBox()
+                w_spin.setRange(0.001, 500.0)
+                w_spin.setSuffix(" mm")
+                w_spin.setValue(comp.params.get('w', 10.0))
+                w_spin.valueChanged.connect(lambda v: self.apply_param('w', v))
+                self.specific_form.addRow("Width", w_spin)
+                
+                h_spin = QDoubleSpinBox()
+                h_spin.setRange(0.001, 500.0)
+                h_spin.setSuffix(" mm")
+                h_spin.setValue(comp.params.get('h', 10.0))
+                h_spin.valueChanged.connect(lambda v: self.apply_param('h', v))
+                self.specific_form.addRow("Height", h_spin)
 
         # 4. Grating Density & Preview Logic
         if isinstance(comp, Grating):
